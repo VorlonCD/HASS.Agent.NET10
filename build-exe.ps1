@@ -43,7 +43,13 @@
 
 .PARAMETER Upload
     With -Tag: replace the assets on the GitHub release of this version without asking. Without it the script
-    asks when such a release exists. With -Upload, a missing `gh` or a failed upload is an error.
+    asks when such a release exists. With -Upload, a missing `gh` or a failed upload is an error. Only a draft
+    release (what CI makes from the tag) is touched: a release already published is left alone, unless
+    -Replace is given too.
+
+.PARAMETER Replace
+    With -Tag: also replace the assets of a release that is already published. Its Sigstore bundles then no
+    longer match; run the sign-release workflow for the tag again afterwards.
 
 .PARAMETER SignScript
     Signing script for -Sign and -Tag, invoked as `& $SignScript -Path <file>`. Default: SignScript in
@@ -87,6 +93,7 @@ param(
     [switch]$Sign,
     [switch]$Tag,
     [switch]$Upload,
+    [switch]$Replace,
     [string]$SignScript,
     [string]$Output = "artifacts\standalone",
     [switch]$Open,
@@ -292,6 +299,13 @@ if ($Tag) {
         if ($Upload) { throw "Not uploading: $mismatch" }
         Write-Host "WARNING: $mismatch" -ForegroundColor Yellow
     }
+
+    # Before anything is built and signed: -Upload goes to a draft only (see -Replace).
+    if ($Upload -and -not $Replace -and (Get-Command gh -ErrorAction SilentlyContinue) -and ($earlyRepo = Get-OriginRepo)) {
+        if ((gh release view $tagName -R $earlyRepo --json isDraft --jq '.isDraft' 2>$null) -eq 'false') {
+            throw "Release $tagName is already published. Check out the tag of the new release, or add -Replace to replace its assets."
+        }
+    }
 }
 
 # --- Build -----------------------------------------------------------------------------------------------------
@@ -410,7 +424,16 @@ if ($Tag) {
         if ($LASTEXITCODE -eq 0) {
             Write-Host "GitHub release $tagName exists on $repo." -ForegroundColor Cyan
             $doUpload = $Upload
-            if (-not $buildMatchesTag) {
+            $isPublished = (gh release view $tagName -R $repo --json isDraft --jq '.isDraft' 2>$null) -eq 'false'
+            if ($isPublished -and -not $Replace) {
+                # A published release is what people and the updater already download, with Sigstore bundles
+                # made for its files. Replacing them by accident (an old checkout still on an earlier tag)
+                # happened once; it takes -Replace now.
+                Write-Host "Release $tagName is already published; its assets are left as they are (add -Replace to replace them)." -ForegroundColor Yellow
+                if ($Upload) { throw "Release $tagName is already published. Check out the tag of the new release, or add -Replace." }
+                $doUpload = $false
+            }
+            elseif (-not $buildMatchesTag) {
                 # Not offered either: the same guard as -Upload's, for the same reason.
                 Write-Host "Its assets are not replaced with this build: $mismatch" -ForegroundColor Yellow
                 $doUpload = $false
@@ -629,3 +652,222 @@ if ($trayWasRunning) {
     Write-Host "  The tray app was closed - start it yourself so it runs unelevated:" -ForegroundColor Yellow
     Write-Host "    $installedExe" -ForegroundColor Yellow
 }
+
+# SIG # Begin signature block
+# MIIodQYJKoZIhvcNAQcCoIIoZjCCKGICAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDSLIQS+mbVftsm
+# 1yAzcwOY5Z8mVIdnEiVY1ap8RMh82aCCDR8wggZeMIIERqADAgECAhBNmC3Mcig7
+# 2XedD7d/I7DIMA0GCSqGSIb3DQEBCwUAMFYxCzAJBgNVBAYTAlBMMSEwHwYDVQQK
+# ExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMTG0NlcnR1bSBDb2Rl
+# IFNpZ25pbmcgMjAyMSBDQTAeFw0yNjA5MTYwODE1NDRaFw0yNzA5MTYwODE1NDNa
+# MIGDMQswCQYDVQQGEwJIVTERMA8GA1UECAwIQnVkYXBlc3QxETAPBgNVBAcMCEJ1
+# ZGFwZXN0MR4wHAYDVQQKDBVPcGVuIFNvdXJjZSBEZXZlbG9wZXIxLjAsBgNVBAMM
+# JU9wZW4gU291cmNlIERldmVsb3BlciBWaWt0b3IgUsOpdsOpc3owggGiMA0GCSqG
+# SIb3DQEBAQUAA4IBjwAwggGKAoIBgQCHgWCQuCnYig77lld16eLYhqH48+uJM8v4
+# TvDcZSF3MB2R9O3clCWgVIVQ8bTh0DAZ55Inpjh6ccJtcyKr0uI8ZZb5kDqdx7wQ
+# OmKC+4Wi0cdHHlLQitn+sPrl/PFgXQbBea9E2gm10cOBDkGUaRvIH2P7nw90R7+j
+# Mog60xqyLEm9l+LdWZxtqdk+b+nuEKuu3HWlMi3bV9/f2G71in0lskDL1bHQJYqS
+# +pNU5WeBBM2mO6Qg6G0d8uzllh0pvRg211Hkts8IyQhyto4vhrdcbQ/Nodl52++p
+# C+q6g9dvsGmCoxCUvooTFj1a5nOXHRLUWAJGP0ZQbrHVKVxg+ifxfIIa6nZOrkIT
+# cKOeiN6qqkIKW2VK29arz9ck0pkKd9thvpEzT9A4EwOFUNK2d8Fqarcc5+RaEBVq
+# npI5jzSPfWQuwBKwGkyr5x/z1/vIWfbtroE4rNb6b5p8JGhR8XtytPIzqC3AkqhC
+# Ch6C2EhquQJt1Nhywrqzt+b7EY/PKm0CAwEAAaOCAXgwggF0MAwGA1UdEwEB/wQC
+# MAAwPQYDVR0fBDYwNDAyoDCgLoYsaHR0cDovL2Njc2NhMjAyMS5jcmwuY2VydHVt
+# LnBsL2Njc2NhMjAyMS5jcmwwcwYIKwYBBQUHAQEEZzBlMCwGCCsGAQUFBzABhiBo
+# dHRwOi8vY2NzY2EyMDIxLm9jc3AtY2VydHVtLmNvbTA1BggrBgEFBQcwAoYpaHR0
+# cDovL3JlcG9zaXRvcnkuY2VydHVtLnBsL2Njc2NhMjAyMS5jZXIwHwYDVR0jBBgw
+# FoAU3XRdTADbe5+gdMqxbvc8wDLAcM0wHQYDVR0OBBYEFHvFGXj34BX8e5Gtig/I
+# qvU3WzF7MEsGA1UdIAREMEIwCAYGZ4EMAQQBMDYGCyqEaAGG9ncCBQEEMCcwJQYI
+# KwYBBQUHAgEWGWh0dHBzOi8vd3d3LmNlcnR1bS5wbC9DUFMwEwYDVR0lBAwwCgYI
+# KwYBBQUHAwMwDgYDVR0PAQH/BAQDAgeAMA0GCSqGSIb3DQEBCwUAA4ICAQBT6+sj
+# irDn4Csvy8n1Kipy7lO6wXUsebHq+ukpO9bMqjhHDjTGol3lxMZbEZbTAoYH7ay8
+# LZHwck9Iu8/yMkzrYmdGD+YuPUHnKa5O7aFqoNvyBddHITln61y7BdF/164RWFP6
+# kmrFjxrtChQc+kv4dAJW+uiAoL36yyBsFnv1sYB5dYt70aElQOBQ4rv4CSbgy/KN
+# d1DqYQ5Q8JcMZgSF95nyKVgGVxekdop/Qw0/HYsoY6CZ6u59S9Upwh7eZ2ZGz9bz
+# nRBvJ1kVv/Q/TNrVJjvRL+Pcicb8UvJwaf3uT1qWglROGcX+3uwgGLDotrSWT9Xi
+# TV+jDbyQfOQKmXW/6HXWqC/z1+nvO6Z257EP03TeaE3UPu3sqORnorkbMCpY0D4j
+# +neh4glK2B7mJmS+hpf/8lVw55++2FvGomeB43ETzRD7tzd9ODYifxcR0QIcPBdd
+# XF2GulF9UsXZmqLIsgSGZtWVA/aiFhgZtflrCrIYTCTH82CO8Hdtq+cWag+U+07H
+# IaR12TLeeviJeBQaaKdF8MI+pWj90jsHdaYGN72F6ViNKZJgREU/Qlw8v7ppmz2f
+# p7L44qHw3PwRrrvkwROmUnvE2M+DLBGZSmrzMPp2Jy+rpIbgr/X3f3+FQms/UuNi
+# dojgO0Qf1aGyq/SE9tCMjzmZCfGNzYqUKefq+jCCBrkwggShoAMCAQICEQCZo4AK
+# JlU7ZavcboSms+o5MA0GCSqGSIb3DQEBDAUAMIGAMQswCQYDVQQGEwJQTDEiMCAG
+# A1UEChMZVW5pemV0byBUZWNobm9sb2dpZXMgUy5BLjEnMCUGA1UECxMeQ2VydHVt
+# IENlcnRpZmljYXRpb24gQXV0aG9yaXR5MSQwIgYDVQQDExtDZXJ0dW0gVHJ1c3Rl
+# ZCBOZXR3b3JrIENBIDIwHhcNMjEwNTE5MDUzMjE4WhcNMzYwNTE4MDUzMjE4WjBW
+# MQswCQYDVQQGEwJQTDEhMB8GA1UEChMYQXNzZWNvIERhdGEgU3lzdGVtcyBTLkEu
+# MSQwIgYDVQQDExtDZXJ0dW0gQ29kZSBTaWduaW5nIDIwMjEgQ0EwggIiMA0GCSqG
+# SIb3DQEBAQUAA4ICDwAwggIKAoICAQCdI88EMCM7wUYs5zNzPmNdenW6vlxNur3r
+# Lfi+5OZ+U3iZIB+AspO+CC/bj+taJUbMbFP1gQBJUzDUCPx7BNLgid1TyztVLn52
+# NKgxxu8gpyTr6EjWyGzKU/gnIu+bHAse1LCitX3CaOE13rbuHbtrxF2tPU8f253Q
+# gX6eO8yTbGps1Mg+yda3DcTsOYOhSYNCJiL+5wnjZ9weoGRtvFgMHtJg6i671OPX
+# IciiHO4Lwo2p9xh/tnj+JmCQEn5QU0NxzrOiRna4kjFaA9ZcwSaG7WAxeC/xoZSx
+# F1oK1UPZtKVt+yrsGKqWONoK6f5EmBOAVEK2y4ATDSkb34UD7JA32f+Rm0wsr5aj
+# zftDhA5mBipVZDjHpwzv8bTKzCDUSUuUmPo1govD0RwFcTtMXcfJtm1i+P2UNXad
+# PyYVKRxKQATHN3imsfBiNRdN5kiVVeqP55piqgxOkyt+HkwIA4gbmSc3hD8ke66t
+# 9MjlcNg73rZZlrLHsAIV/nJ0mmgSjBI/TthoGJDydekOQ2tQD2Dup/+sKQptalDl
+# ui59SerVSJg8gAeV7N/ia4mrGoiez+SqV3olVfxyLFt3o/OQOnBmjhKUANoKLYlK
+# mUpKEFI0PfoT8Q1W/y6s9LTI6ekbi0igEbFUIBE8KDUGfIwnisEkBw5KcBZ3XwnH
+# mfznwlKo8QIDAQABo4IBVTCCAVEwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQU
+# 3XRdTADbe5+gdMqxbvc8wDLAcM0wHwYDVR0jBBgwFoAUtqFUOQLDoD+Oirz61Pgc
+# ptE6Dv0wDgYDVR0PAQH/BAQDAgEGMBMGA1UdJQQMMAoGCCsGAQUFBwMDMDAGA1Ud
+# HwQpMCcwJaAjoCGGH2h0dHA6Ly9jcmwuY2VydHVtLnBsL2N0bmNhMi5jcmwwbAYI
+# KwYBBQUHAQEEYDBeMCgGCCsGAQUFBzABhhxodHRwOi8vc3ViY2Eub2NzcC1jZXJ0
+# dW0uY29tMDIGCCsGAQUFBzAChiZodHRwOi8vcmVwb3NpdG9yeS5jZXJ0dW0ucGwv
+# Y3RuY2EyLmNlcjA5BgNVHSAEMjAwMC4GBFUdIAAwJjAkBggrBgEFBQcCARYYaHR0
+# cDovL3d3dy5jZXJ0dW0ucGwvQ1BTMA0GCSqGSIb3DQEBDAUAA4ICAQB1iFgP5Y9Q
+# KJpTnxDsQ/z0O23JmoZifZdEOEmQvo/79PQg9nLF/GJe6ZiUBEyDBHMtFRK0mXj3
+# Qv3gL0sYXe+PPMfwmreJHvgFGWQ7XwnfMh2YIpBrkvJnjwh8gIlNlUl4KENTK5DL
+# qsYPEtRQCw7R6p4s2EtWyDDr/M58iY2UBEqfUU/ujR9NuPyKk0bEcEi62JGxauFY
+# zZ/yld13fHaZskIoq2XazjaD0pQkcQiIueL0HKiohS6XgZuUtCKA7S6CHttZEsOb
+# QJ1j2s0urIDdqF7xaXFVaTHKtAuMfwi0jXtF3JJphrJfc+FFILgCbX/uYBPBlbBI
+# P4Ht4xxk2GmfzMn7oxPITpigQFJFWuzTMUUgdRHTxaTSKRJ/6Uh7ki/pFjf9sUAS
+# WgxT69QF9Ki4JF5nBIujxZ2sOU9e1HSCJwOfK07t5nnzbs1LbHuAIGJsRJiQ6HX/
+# DW1XFOlXY1rc9HufFhWU+7Uk+hFkJsfzqBz3pRO+5aI6u5abI4Qws4YaeJH7H7M8
+# X/YNoaArZbV4Ql+jarKsE0+8XvC4DJB+IVcvC9Ydqahi09mjQse4fxfef0L7E3hh
+# o2O3bLDM6v60rIRUCi2fJT2/IRU5ohgyTch4GuYWefSBsp5NPJh4QRTP9DC3gc5Q
+# EKtbrTY0Ka87Web7/zScvLmvQBm8JDFpDjGCGqwwghqoAgEBMGowVjELMAkGA1UE
+# BhMCUEwxITAfBgNVBAoTGEFzc2VjbyBEYXRhIFN5c3RlbXMgUy5BLjEkMCIGA1UE
+# AxMbQ2VydHVtIENvZGUgU2lnbmluZyAyMDIxIENBAhBNmC3Mcig72XedD7d/I7DI
+# MA0GCWCGSAFlAwQCAQUAoHwwEAYKKwYBBAGCNwIBDDECMAAwGQYJKoZIhvcNAQkD
+# MQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJ
+# KoZIhvcNAQkEMSIEIKixU0AQzxmk0Yo3x+ylajcH2sux0QViW9kjFIw2keQAMA0G
+# CSqGSIb3DQEBAQUABIIBgHCypDngmhfZLS0WGXd3JkhfUBoEOFSRKPN509SFi4qP
+# L8uG5uZcu/3F2t4MAgYbBhBcGKpg6rLdOCFoUYW6nFAZByk7jG9wA372wvhEGNFO
+# GzDaHsMUGi4FrNc7swHi4GPkYKh+WNM7A//l6fkeQebBHb73/PpVqswBDy5DFtKG
+# HWPb6YkChJNDHBmXR65v1yo8DEAD7PLuIpkxQbAS9CaPhodDRgH2JIw0aK8fuMoS
+# /0P5tth4py8xgb2nFwFoWMNLRAHWD2aPamaeYGcoaz+dBaykafNDQZXiCMyiKWZp
+# of2Xc0Q4f9Iw5YQijWgzfa0TDHIVZgRbi41nuPH2xUBJ6/aixw7aeZrSaSbcdDq8
+# qwBVgSHapa1rqLuVrZ7LP8GWHrBT0q70FH43Ur+HaY+/BiqULfqoxVWM/p17Z3wO
+# MtRsag88kuI09YB9o5RnmjU0JKx8V+halv/tV1btWuUMvGISVqsMBYQTVU1oiBjc
+# oBbBl5mGOtrLg4wwaIlygqGCGBUwghgRBgorBgEEAYI3AwMBMYIYATCCF/0GCSqG
+# SIb3DQEHAqCCF+4wghfqAgEDMQ0wCwYJYIZIAWUDBAICMIHOBgsqhkiG9w0BCRAB
+# BKCBvgSBuzCBuAIBAQYLKoRoAYb2dwIFAQswMTANBglghkgBZQMEAgEFAAQgesTD
+# 3trhbDy88Pa9UbEl5NmnoOCkTRvpmqlHvQpwxNcCBwqofHOoBXoYDzIwMjYxMDEx
+# MTgzMjQ4WjADAgEBoFSkUjBQMQswCQYDVQQGEwJQTDEhMB8GA1UECgwYQXNzZWNv
+# IERhdGEgU3lzdGVtcyBTLkEuMR4wHAYDVQQDDBVDZXJ0dW0gVGltZXN0YW1wIDIw
+# MjagghMQMIIGgjCCBGqgAwIBAgIQKPB3wRw2vf5fdDJHcCcuAzANBgkqhkiG9w0B
+# AQwFADBWMQswCQYDVQQGEwJQTDEhMB8GA1UEChMYQXNzZWNvIERhdGEgU3lzdGVt
+# cyBTLkEuMSQwIgYDVQQDExtDZXJ0dW0gVGltZXN0YW1waW5nIDIwMjEgQ0EwHhcN
+# MjYwMzExMDczNDU0WhcNMzYwMjI3MDczNDU0WjBQMQswCQYDVQQGEwJQTDEhMB8G
+# A1UECgwYQXNzZWNvIERhdGEgU3lzdGVtcyBTLkEuMR4wHAYDVQQDDBVDZXJ0dW0g
+# VGltZXN0YW1wIDIwMjYwggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAwggIKAoICAQC4
+# vc3wcPsSNdoYthfbjUATTkk5EyItd37odw4lsmyOd/dmwXycOrTu8w7O1Kj/63o1
+# X+MRU1N1zTj7LjhZD+UjxbJ1sJ91SS/jYTYbLro72LELWkJ7zaNcJOOq3k4MLNS/
+# DhRHSmsYMqk+MzkMfNZi8DWUqlzVPUa2/aACViReDMnc/gtXm7tA9Pr4DN7agEPE
+# 1NtN36oCgj6iHR5aGhah/XskfvLZ6ZstoZ5zefWTrZrLh3kcH+YkzoZYX9Hf6qqr
+# izkiBj4BlS9R4+VwVKMdjhO7UEa/pf8cTWy+jrsATuAGthG7sWIN+3KV7+Ytv5Uy
+# +DQEgf3bn/VuH4wN0aPhj/mwueJ9jmIjNwqvM/dno8fBeR1jtnuP++XgveQfbTMP
+# 3qu9dPRg8ltvtrreQZ9KPDFyUxEZMsrLVm6nJ1JKJgPe6n4gwsL6VrjjHX0zpLF3
+# vUvsQ8TiWgm4sk4r4D7pcXE/rX0E0Vwa+VMLT73PiDZ2nzhIpc1RwNdbb/qR3Mpa
+# 8sQXNPHFIoX/7bapGUtG5sd1cUGsvLqIWk6dP/xAgPb2BludUinSTCYV7ysiHQS8
+# vFmDXIU7fMkSE7/QHcYPSahro4fk5z9W1t2kIxbZRJe0s4DXiPDlQPwiQFllLkU9
+# wLvU6DqR8v35a65J4TeIXhMO/+iCzL+B0rI9GGeKLQIDAQABo4IBUDCCAUwwdQYI
+# KwYBBQUHAQEEaTBnMDsGCCsGAQUFBzAChi9odHRwOi8vc3ViY2EucmVwb3NpdG9y
+# eS5jZXJ0dW0ucGwvY3RzY2EyMDIxLmNlcjAoBggrBgEFBQcwAYYcaHR0cDovL3N1
+# YmNhLm9jc3AtY2VydHVtLmNvbTAfBgNVHSMEGDAWgBS+VAIvv0Bsc0POrAklTp5D
+# RBru4DAMBgNVHRMBAf8EAjAAMDkGA1UdHwQyMDAwLqAsoCqGKGh0dHA6Ly9zdWJj
+# YS5jcmwuY2VydHVtLnBsL2N0c2NhMjAyMS5jcmwwFgYDVR0lAQH/BAwwCgYIKwYB
+# BQUHAwgwDgYDVR0PAQH/BAQDAgeAMCIGA1UdIAQbMBkwCAYGZ4EMAQQCMA0GCyqE
+# aAGG9ncCBQELMB0GA1UdDgQWBBQjOWooq5oSp6Sn8h/5RZq/jf6CAzANBgkqhkiG
+# 9w0BAQwFAAOCAgEAZv6Tm6wL3k6mBTwkrYcTVcAR01uE37gUGNihgnTJR+gC41T2
+# H9lwETRjE10nEdCUNv3Ni8S6aBx4UcMRX93fd9w4RUteua2I+oj0kCpuNa3PQDKU
+# wozHZmotWivaPO9KTs08y0YVhVSMZvuUH/reFec9eLT6FLAFnX0Sg9Wc7833uQB5
+# RPa8TmXBkTolC8bNxHX+2SfEWSNI8w/Y7o9qBF9l0uwVSrjQitVtIdZo2qb9NvMq
+# qPFLWYef9SG+PGMqfPAQ2EoYeT0hlFLkubWF1X3HbiDwXtz3TU2EWHU+VTcZMC4I
+# zMyHK/+kh9n3oxSQ45wsY71y7mqxKyYPyHSPoV3RiAQ1Thr9c65BeJLaELxWSKeQ
+# yAGIdBsMlIXPO6qp+VGmE49vosogQ0jYe2hgq5LgJ6oO0Ie364V/kITBnifUqS6Z
+# xu+qjfOYS8o72EeoEWIi04/BuH8Y6leNNP27j8NKwaPciWcqv/HBnQjizzmH/aqX
+# n03K2SnjvaYPlCR8fFAAW2k6os0cZvLFEhMnHHAghYSIrdwCP98BrkjgA3ogOu+j
+# XEO/nbD9OGL873Te6U2TcoOu9lqQQyXYNHiLR5eMqJrzXiDlodarOEKjlukyPDnL
+# IuLkg0y6K8S1A5wU8CkM86cXdWFHLRIEYd9kdCfRZBZHhK7iVPeEZYxa9bgwgga5
+# MIIEoaADAgECAhEA5/9pxzs1zkuRJth0fGilhzANBgkqhkiG9w0BAQwFADCBgDEL
+# MAkGA1UEBhMCUEwxIjAgBgNVBAoTGVVuaXpldG8gVGVjaG5vbG9naWVzIFMuQS4x
+# JzAlBgNVBAsTHkNlcnR1bSBDZXJ0aWZpY2F0aW9uIEF1dGhvcml0eTEkMCIGA1UE
+# AxMbQ2VydHVtIFRydXN0ZWQgTmV0d29yayBDQSAyMB4XDTIxMDUxOTA1MzIwN1oX
+# DTM2MDUxODA1MzIwN1owVjELMAkGA1UEBhMCUEwxITAfBgNVBAoTGEFzc2VjbyBE
+# YXRhIFN5c3RlbXMgUy5BLjEkMCIGA1UEAxMbQ2VydHVtIFRpbWVzdGFtcGluZyAy
+# MDIxIENBMIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEA6RIfBDXtuV16
+# xaaVQb6KZX9Od9FtJXXTZo7b+GEof3+3g0ChWiKnO7R4+6MfrvLyLCWZa6GpFHjE
+# t4t0/GiUQvnkLOBRdBqr5DOvlmTvJJs2X8ZmWgWJjC7PBZLYBWAs8sJl3kNXxBMX
+# 5XntjqWx1ZOuuXl0R4x+zGGSMzZ45dpvB8vLpQfZkfMC/1tL9KYyjU+htLH68dZJ
+# PtzhqLBVG+8ljZ1ZFilOKksS79epCeqFSeAUm2eMTGpOiS3gfLM6yvb8Bg6bxg5y
+# glDGC9zbr4sB9ceIGRtCQF1N8dqTgM/dSViiUgJkcv5dLNJeWxGCqJYPgzKlYZTg
+# DXfGIeZpEFmjBLwURP5ABsyKoFocMzdjrCiFbTvJn+bD1kq78qZUgAQGGtd6zGJ8
+# 8H4NPJ5Y2R4IargiWAmv8RyvWnHr/VA+2PrrK9eXe5q7M88YRdSTq9TKbqdnITUg
+# Zcjjm4ZUjteq8K331a4P0s2in0p3UubMEYa/G5w6jSWPUzchGLwWKYBfeSu6dIOC
+# 4LkeAPvmdZxSB1lWOb9HzVWZoM8Q/blaP4LWt6JxjkI9yQsYGMdCqwl7uMnPUIlc
+# ExS1mzXRxUowQref/EPaS7kYVaHHQrp4XB7nTEtQhkP0Z9Puz/n8zIFnUSnxDof4
+# Yy650PAXSYmK2TcbyDoTNmmt8xAxzcMCAwEAAaOCAVUwggFRMA8GA1UdEwEB/wQF
+# MAMBAf8wHQYDVR0OBBYEFL5UAi+/QGxzQ86sCSVOnkNEGu7gMB8GA1UdIwQYMBaA
+# FLahVDkCw6A/joq8+tT4HKbROg79MA4GA1UdDwEB/wQEAwIBBjATBgNVHSUEDDAK
+# BggrBgEFBQcDCDAwBgNVHR8EKTAnMCWgI6Ahhh9odHRwOi8vY3JsLmNlcnR1bS5w
+# bC9jdG5jYTIuY3JsMGwGCCsGAQUFBwEBBGAwXjAoBggrBgEFBQcwAYYcaHR0cDov
+# L3N1YmNhLm9jc3AtY2VydHVtLmNvbTAyBggrBgEFBQcwAoYmaHR0cDovL3JlcG9z
+# aXRvcnkuY2VydHVtLnBsL2N0bmNhMi5jZXIwOQYDVR0gBDIwMDAuBgRVHSAAMCYw
+# JAYIKwYBBQUHAgEWGGh0dHA6Ly93d3cuY2VydHVtLnBsL0NQUzANBgkqhkiG9w0B
+# AQwFAAOCAgEAuJNZd8lMFf2UBwigp3qgLPBBk58BFCS3Q6aJDf3TISoytK0eal/J
+# yCB88aUEd0wMNiEcNVMbK9j5Yht2whaknUE1G32k6uld7wcxHmw67vUBY6pSp8Qh
+# dodY4SzRRaZWzyYlviUpyU4dXyhKhHSncYJfa1U75cXxCe3sTp9uTBm3f8Bj8Lkp
+# jMUSVTtMJ6oEu5JqCYzRfc6nnoRUgwz/GVZFoOBGdrSEtDN7mZgcka/tS5MI47fA
+# LVvN5lZ2U8k7Dm/hTX8CWOw0uBZloZEW4HB0Xra3qE4qzzq/6M8gyoU/DE0k3+i7
+# bYOrOk/7tPJg1sOhytOGUQ30PbG++0FfJioDuOFhj99b151SqFlSaRQYz74y/P2X
+# JP+cF19oqozmi0rRTkfyEJIvhIZ+M5XIFZttmVQgTxfpfJwMFFEoQrSrklOxpmSy
+# gppsUDJEoliC05vBLVQ+gMZyYaKvBJ4YxBMlKH5ZHkRdloRYlUDplk8GUa+OCMVh
+# pDSQurU6K1ua5dmZftnvSSz2H96UrQDzA6DyiI1V3ejVtvn2azVAXg6NnjmuRZ+w
+# a7Pxy0H3+V4K4rOTHlG3VYA6xfLsTunCz72T6Ot4+tkrDYOeaU1pPX1CBfYj6EW2
+# +ELq46GP8KCNUQDirWLU4nOmgCat7vN0SD6RlwUiSsMeCiQDmZwgwrUwggXJMIIE
+# saADAgECAhAbtY8lKt8jAEkoya49fu0nMA0GCSqGSIb3DQEBDAUAMH4xCzAJBgNV
+# BAYTAlBMMSIwIAYDVQQKExlVbml6ZXRvIFRlY2hub2xvZ2llcyBTLkEuMScwJQYD
+# VQQLEx5DZXJ0dW0gQ2VydGlmaWNhdGlvbiBBdXRob3JpdHkxIjAgBgNVBAMTGUNl
+# cnR1bSBUcnVzdGVkIE5ldHdvcmsgQ0EwHhcNMjEwNTMxMDY0MzA2WhcNMjkwOTE3
+# MDY0MzA2WjCBgDELMAkGA1UEBhMCUEwxIjAgBgNVBAoTGVVuaXpldG8gVGVjaG5v
+# bG9naWVzIFMuQS4xJzAlBgNVBAsTHkNlcnR1bSBDZXJ0aWZpY2F0aW9uIEF1dGhv
+# cml0eTEkMCIGA1UEAxMbQ2VydHVtIFRydXN0ZWQgTmV0d29yayBDQSAyMIICIjAN
+# BgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAvfl4+ObVgAxknYYblmRnPyI6HnUB
+# fe/7XGeMycxca6mR5rlC5SBLm9qbe7mZXdmbgEvXhEArJ9PoujC7Pgkap0mV7ytA
+# JMKXx6fumyXvqAoAl4Vaqp3cKcniNQfrcE1K1sGzVrihQTib0fsxf4/gX+GxPw+O
+# Fklg1waNGPmqJhCrKtPQ0WeNG0a+RzDVLnLRxWPa52N5RH5LYySJhi40PylMUosq
+# p8DikSiJucBb+R3Z5yet/5oCl8HGUJKbAiy9qbk0WQq/hEr/3/6zn+vZnuCYI+ym
+# a3cWKtvMrTscpIfcRnNeGWJoRVfkkIJCu0LW8GHgwaM9ZqNd9BjuiMmNF0UpmTJ1
+# AjHuKSbIawLmtWJFfzcVWiNoidQ+3k4nsPBADLxNF8tNorMe0AZa3faTz1d1mfX6
+# hhpneLO/lv403L3nUlbls+V1e9dBkQXcXWnjlQ1DufyDljmVe2yAWk8TcsbXfSl6
+# RLpSpCrVQUYJIP4ioLZbMI28iQzV13D4h1L92u+sUS4Hs07+0AnacO+Y+lbmbdu1
+# V0vc5SwlFcieLnhO+NqcnoYsylfzGuXIkosagpZ6w7xQEmnYDlpGizrrJvojybaw
+# gb5CAKT41v4wLsfSRvbljnX98sy50IdbzAYQYLuDNbdeZ95H7JlI8aShFf6tjGKO
+# OVVPORa5sWOd/7cCAwEAAaOCAT4wggE6MA8GA1UdEwEB/wQFMAMBAf8wHQYDVR0O
+# BBYEFLahVDkCw6A/joq8+tT4HKbROg79MB8GA1UdIwQYMBaAFAh2zcsH/yT2xc3t
+# u5C84oQ3RnX3MA4GA1UdDwEB/wQEAwIBBjAvBgNVHR8EKDAmMCSgIqAghh5odHRw
+# Oi8vY3JsLmNlcnR1bS5wbC9jdG5jYS5jcmwwawYIKwYBBQUHAQEEXzBdMCgGCCsG
+# AQUFBzABhhxodHRwOi8vc3ViY2Eub2NzcC1jZXJ0dW0uY29tMDEGCCsGAQUFBzAC
+# hiVodHRwOi8vcmVwb3NpdG9yeS5jZXJ0dW0ucGwvY3RuY2EuY2VyMDkGA1UdIAQy
+# MDAwLgYEVR0gADAmMCQGCCsGAQUFBwIBFhhodHRwOi8vd3d3LmNlcnR1bS5wbC9D
+# UFMwDQYJKoZIhvcNAQEMBQADggEBAFHCoVgWIhCL/IYx1MIy01z4S6Ivaj5N+KsI
+# Hu3V6PrnCA3st8YeDrJ1BXqxC/rXdGoABh+kzqrya33YEcARCNQOTWHFOqj6seHj
+# mOriY/1B9ZN9DbxdkjuRmmW60F9MvkyNaAMQFtXx0ASKhTP5N+dbLiZpQjy6zbzU
+# eulNndrnQ/tjUoCFBMQllVXwfqefAcVbKPjgzoZwpic7Ofs4LphTZSJ1Ldf23SIi
+# kZbr3WjtP6MZl9M7JYjsNhI9qX7OAo0FmpKnJ25FspxihjcNpDOO16hO0EoXQ0zF
+# 8ads0h5YbBRRfopUofbvn3l6XYGaFpAP4bvxSgD5+d2+7arszgoxggPvMIID6wIB
+# ATBqMFYxCzAJBgNVBAYTAlBMMSEwHwYDVQQKExhBc3NlY28gRGF0YSBTeXN0ZW1z
+# IFMuQS4xJDAiBgNVBAMTG0NlcnR1bSBUaW1lc3RhbXBpbmcgMjAyMSBDQQIQKPB3
+# wRw2vf5fdDJHcCcuAzANBglghkgBZQMEAgIFAKCCAVYwGgYJKoZIhvcNAQkDMQ0G
+# CyqGSIb3DQEJEAEEMBwGCSqGSIb3DQEJBTEPFw0yNjEwMTExODMyNDhaMDcGCyqG
+# SIb3DQEJEAIvMSgwJjAkMCIEIIW+kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EF
+# JcQ8MD8GCSqGSIb3DQEJBDEyBDCgja9ZGPCMyfjC2U/DqmVfh90nlOneghfPqWxa
+# FSukqkmzDzgG1lLFim89Tc7koVAwgZ8GCyqGSIb3DQEJEAIMMYGPMIGMMIGJMIGG
+# BBRXFGhBDKha80JO+RZKUTYQ9NONmDBuMFqkWDBWMQswCQYDVQQGEwJQTDEhMB8G
+# A1UEChMYQXNzZWNvIERhdGEgU3lzdGVtcyBTLkEuMSQwIgYDVQQDExtDZXJ0dW0g
+# VGltZXN0YW1waW5nIDIwMjEgQ0ECECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcN
+# AQEBBQAEggIAmBBeb1U50L0v0qwQ4xb7yLPski2sy1b5dNcd6ljceLVjz8evScf/
+# tRd+2Mc99wWO+FeVJ1nwDeWWRAvRHuU5L75w8qGhQ5JoJkMQ/UtDfLD3CHSftt1w
+# zOR33ZkNZHJK8AzFsRnFOuQM33Yrcl6mutN2rFfjprDDMFBHLwAuCmaUC3J94UrS
+# b/wAY84NSZTyXMMR3hy/V+8xKwEpXMAd3GZDx8fpUKwwD7YL0dwgHYYyno8bVgWD
+# VM1HeQ3ctjL0fZSIOTFNBEKrL5gWAJyrhIaejP3m1rxiuwHhIzWn9CY+WtuSholC
+# 3PNE4+xfz3RiYEkiU+PMTfawIEzQOcgropye/RsQLshz7oU+m8zLpKLo3bo5Q5qn
+# g9vABM8Vwo+BK6RNqKO2qbmTaAdGrQguV4IkfWLjVNAk3/qnRlx+xlu8TiW/bMfa
+# ToNLyXtFzk17FoGbycGuHEA2FUNvoue3cMRZlA95RvlRgpPnQc5z8ExftlRvcOl9
+# nxDge0WAZYV+9JFV+9VersR/Lc2WEi+GFSEcRiwBQKNWv3dzVWkMJYbtnNN5wVUT
+# xDgkDX9IQDiwkT/oRqydWQi6FOyf9ndvVH0QJel5wfdmgQRcIJ/5/9uqQy0ndpse
+# d/VeW53zvsUm7kpRCUHKVRaLgrYiKN/Jt5QHJgRQqOHf9xrsYfg4d8k=
+# SIG # End signature block

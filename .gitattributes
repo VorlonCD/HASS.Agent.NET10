@@ -1,0 +1,2 @@
+# Signed PowerShell scripts: the signature covers the exact bytes, line endings included.
+*.ps1 text eol=crlf
