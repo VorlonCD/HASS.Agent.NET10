@@ -202,7 +202,7 @@ The security release after the feature release: 10.9.0 brought new things to do,
 
 - **A hotkey is pressed, not typed, and you see at once whether it is free.** In the hotkey editor the combination is pressed in its field (Backspace clears it). The line under it says straight away whether Windows lets HASS.Agent have it, or whether Windows or another program already uses it; it also says when another hotkey of the list has the same combination, and warns about one modifier alone (ctrl+c, alt+f4). A taken combination is kept only when OK is pressed twice; the app then tries it again every minute, so it starts working once the other program lets it go.
 - The service no longer restarts its connection after an update.
-- **The broker drops the PC with "malformed packet"?** On one PC with a Realtek 2.5G network card it was the card's Large Send Offload; [Connecting to Home Assistant](docs/connection.md#mqtt-topics) says how to switch it off.
+- **The broker drops the PC with "malformed packet"?** On one PC with a Realtek 2.5G network card it stopped once the card's Large Send Offload was switched off; [Connecting to Home Assistant](docs/connection.md#mqtt-topics) says how to switch it off.
 - The local HTTP API compares the API key in constant time, and a new one comes from the cryptographic random generator.
 - Notification pictures: at most two downloads at a time, none from this PC itself, redirects checked one by one, nothing over 50 megapixels; old ones are cleaned up once an hour.
 - Limits on what LibreHardwareMonitor sends: at most 4 MB and 5000 values are read.
