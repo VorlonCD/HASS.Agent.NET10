@@ -126,6 +126,20 @@ function Get-OriginRepo {
     return $null
 }
 
+# Whether the GitHub release of a tag is a draft, published, or missing. Anything else gh says (no login, no
+# network) is an error, never taken for one of those: the answer decides whether files may be replaced.
+function Get-ReleaseState([string] $tag, [string] $repo) {
+    $answer = gh release view $tag -R $repo --json isDraft --jq '.isDraft' 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        switch ("$answer".Trim()) {
+            'true' { return 'draft' }
+            'false' { return 'published' }
+        }
+    }
+    elseif ("$answer" -match 'release not found') { return 'missing' }
+    throw "gh could not tell whether release $tag is a draft: $answer"
+}
+
 # --- Which source a development build uses (see the description) ------------------------------------------------
 # Returns the folder to build from: this one, or an export of the chosen commit under %TEMP%.
 function Select-Source {
@@ -302,7 +316,7 @@ if ($Tag) {
 
     # Before anything is built and signed: -Upload goes to a draft only (see -Replace).
     if ($Upload -and -not $Replace -and (Get-Command gh -ErrorAction SilentlyContinue) -and ($earlyRepo = Get-OriginRepo)) {
-        if ((gh release view $tagName -R $earlyRepo --json isDraft --jq '.isDraft' 2>$null) -eq 'false') {
+        if ((Get-ReleaseState $tagName $earlyRepo) -eq 'published') {
             throw "Release $tagName is already published. Check out the tag of the new release, or add -Replace to replace its assets."
         }
     }
@@ -424,7 +438,7 @@ if ($Tag) {
         if ($LASTEXITCODE -eq 0) {
             Write-Host "GitHub release $tagName exists on $repo." -ForegroundColor Cyan
             $doUpload = $Upload
-            $isPublished = (gh release view $tagName -R $repo --json isDraft --jq '.isDraft' 2>$null) -eq 'false'
+            $isPublished = (Get-ReleaseState $tagName $repo) -eq 'published'
             if ($isPublished -and -not $Replace) {
                 # A published release is what people and the updater already download, with Sigstore bundles
                 # made for its files. Replacing them by accident (an old checkout still on an earlier tag)
@@ -656,8 +670,8 @@ if ($trayWasRunning) {
 # SIG # Begin signature block
 # MIIodQYJKoZIhvcNAQcCoIIoZjCCKGICAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDSLIQS+mbVftsm
-# 1yAzcwOY5Z8mVIdnEiVY1ap8RMh82aCCDR8wggZeMIIERqADAgECAhBNmC3Mcig7
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBVN1xIQMcC6ryT
+# JcvQZXUoosFqt4+8NNREGbdfrUX0eKCCDR8wggZeMIIERqADAgECAhBNmC3Mcig7
 # 2XedD7d/I7DIMA0GCSqGSIb3DQEBCwUAMFYxCzAJBgNVBAYTAlBMMSEwHwYDVQQK
 # ExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMTG0NlcnR1bSBDb2Rl
 # IFNpZ25pbmcgMjAyMSBDQTAeFw0yNjA5MTYwODE1NDRaFw0yNzA5MTYwODE1NDNa
@@ -732,20 +746,20 @@ if ($trayWasRunning) {
 # AxMbQ2VydHVtIENvZGUgU2lnbmluZyAyMDIxIENBAhBNmC3Mcig72XedD7d/I7DI
 # MA0GCWCGSAFlAwQCAQUAoHwwEAYKKwYBBAGCNwIBDDECMAAwGQYJKoZIhvcNAQkD
 # MQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJ
-# KoZIhvcNAQkEMSIEIKixU0AQzxmk0Yo3x+ylajcH2sux0QViW9kjFIw2keQAMA0G
-# CSqGSIb3DQEBAQUABIIBgHCypDngmhfZLS0WGXd3JkhfUBoEOFSRKPN509SFi4qP
-# L8uG5uZcu/3F2t4MAgYbBhBcGKpg6rLdOCFoUYW6nFAZByk7jG9wA372wvhEGNFO
-# GzDaHsMUGi4FrNc7swHi4GPkYKh+WNM7A//l6fkeQebBHb73/PpVqswBDy5DFtKG
-# HWPb6YkChJNDHBmXR65v1yo8DEAD7PLuIpkxQbAS9CaPhodDRgH2JIw0aK8fuMoS
-# /0P5tth4py8xgb2nFwFoWMNLRAHWD2aPamaeYGcoaz+dBaykafNDQZXiCMyiKWZp
-# of2Xc0Q4f9Iw5YQijWgzfa0TDHIVZgRbi41nuPH2xUBJ6/aixw7aeZrSaSbcdDq8
-# qwBVgSHapa1rqLuVrZ7LP8GWHrBT0q70FH43Ur+HaY+/BiqULfqoxVWM/p17Z3wO
-# MtRsag88kuI09YB9o5RnmjU0JKx8V+halv/tV1btWuUMvGISVqsMBYQTVU1oiBjc
-# oBbBl5mGOtrLg4wwaIlygqGCGBUwghgRBgorBgEEAYI3AwMBMYIYATCCF/0GCSqG
+# KoZIhvcNAQkEMSIEIOP5QAbQDNHfRePw/os4gx4o02eC1FXBFuosTuD/6vqYMA0G
+# CSqGSIb3DQEBAQUABIIBgCF1Zr99gwysRiFh7udmviXMQHQY1Mqh4fPWHmYDgTyE
+# 8q7zqmXIDlMSwBiaqnOJcAu/SVfq+H6Vvce7DTRzHF2oIrfxbhQrjIbLy6aMKlx9
+# VW1NAQSXh2+nWmigsW4yH13ZSkteHpiB3f4lHnDQZEOySNHytHdtLzRWLDOqiV7S
+# 2sxSC8tIK/a2tGeT6Zs8oH5kdP57OZoFp5IKk4x4i7YbhBf55nyMujoIAcBkxq8J
+# dZeasIi7nEXcIhZLqikP5LBWxpL9Al73I5Dh1DBWY7FsN5MVK8S+gkCHWgej1n9l
+# S6uTCZpIxv5LSThJoJFzJDrVtoaahAdGlnPfoCogFwTaF8P7NcrNEgS3akseMajM
+# fmR8TbrHAtTjMQYYNU507ctZQ3j//4E1d25AFGbm9wqGr2HgPQEWzsvWYDm9hz1Z
+# i7RP+X6VTDfLVtcVpT0bnIAhVaBaGrjhlLEozPOlfD2k1o30/L27p6sMdGpKCe6K
+# BVYWeq33OOSdh8uYGgW5JaGCGBUwghgRBgorBgEEAYI3AwMBMYIYATCCF/0GCSqG
 # SIb3DQEHAqCCF+4wghfqAgEDMQ0wCwYJYIZIAWUDBAICMIHOBgsqhkiG9w0BCRAB
-# BKCBvgSBuzCBuAIBAQYLKoRoAYb2dwIFAQswMTANBglghkgBZQMEAgEFAAQgesTD
-# 3trhbDy88Pa9UbEl5NmnoOCkTRvpmqlHvQpwxNcCBwqofHOoBXoYDzIwMjYxMDEx
-# MTgzMjQ4WjADAgEBoFSkUjBQMQswCQYDVQQGEwJQTDEhMB8GA1UECgwYQXNzZWNv
+# BKCBvgSBuzCBuAIBAQYLKoRoAYb2dwIFAQswMTANBglghkgBZQMEAgEFAAQgcjOw
+# iALWQ/YR2so/gHzsdlISx0bxjOYwecNq5/mnyDACBwqofHOOG4cYDzIwMjYxMDEx
+# MTgzNzIyWjADAgEBoFSkUjBQMQswCQYDVQQGEwJQTDEhMB8GA1UECgwYQXNzZWNv
 # IERhdGEgU3lzdGVtcyBTLkEuMR4wHAYDVQQDDBVDZXJ0dW0gVGltZXN0YW1wIDIw
 # MjagghMQMIIGgjCCBGqgAwIBAgIQKPB3wRw2vf5fdDJHcCcuAzANBgkqhkiG9w0B
 # AQwFADBWMQswCQYDVQQGEwJQTDEhMB8GA1UEChMYQXNzZWNvIERhdGEgU3lzdGVt
@@ -852,22 +866,22 @@ if ($trayWasRunning) {
 # ATBqMFYxCzAJBgNVBAYTAlBMMSEwHwYDVQQKExhBc3NlY28gRGF0YSBTeXN0ZW1z
 # IFMuQS4xJDAiBgNVBAMTG0NlcnR1bSBUaW1lc3RhbXBpbmcgMjAyMSBDQQIQKPB3
 # wRw2vf5fdDJHcCcuAzANBglghkgBZQMEAgIFAKCCAVYwGgYJKoZIhvcNAQkDMQ0G
-# CyqGSIb3DQEJEAEEMBwGCSqGSIb3DQEJBTEPFw0yNjEwMTExODMyNDhaMDcGCyqG
+# CyqGSIb3DQEJEAEEMBwGCSqGSIb3DQEJBTEPFw0yNjEwMTExODM3MjJaMDcGCyqG
 # SIb3DQEJEAIvMSgwJjAkMCIEIIW+kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EF
-# JcQ8MD8GCSqGSIb3DQEJBDEyBDCgja9ZGPCMyfjC2U/DqmVfh90nlOneghfPqWxa
-# FSukqkmzDzgG1lLFim89Tc7koVAwgZ8GCyqGSIb3DQEJEAIMMYGPMIGMMIGJMIGG
+# JcQ8MD8GCSqGSIb3DQEJBDEyBDBy5DY90dYdVkK0TMdXHxsL4r5q0J7183xdJ7DU
+# u/fDdtxBvO3B6Sq4NZrlSzUkTgUwgZ8GCyqGSIb3DQEJEAIMMYGPMIGMMIGJMIGG
 # BBRXFGhBDKha80JO+RZKUTYQ9NONmDBuMFqkWDBWMQswCQYDVQQGEwJQTDEhMB8G
 # A1UEChMYQXNzZWNvIERhdGEgU3lzdGVtcyBTLkEuMSQwIgYDVQQDExtDZXJ0dW0g
 # VGltZXN0YW1waW5nIDIwMjEgQ0ECECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcN
-# AQEBBQAEggIAmBBeb1U50L0v0qwQ4xb7yLPski2sy1b5dNcd6ljceLVjz8evScf/
-# tRd+2Mc99wWO+FeVJ1nwDeWWRAvRHuU5L75w8qGhQ5JoJkMQ/UtDfLD3CHSftt1w
-# zOR33ZkNZHJK8AzFsRnFOuQM33Yrcl6mutN2rFfjprDDMFBHLwAuCmaUC3J94UrS
-# b/wAY84NSZTyXMMR3hy/V+8xKwEpXMAd3GZDx8fpUKwwD7YL0dwgHYYyno8bVgWD
-# VM1HeQ3ctjL0fZSIOTFNBEKrL5gWAJyrhIaejP3m1rxiuwHhIzWn9CY+WtuSholC
-# 3PNE4+xfz3RiYEkiU+PMTfawIEzQOcgropye/RsQLshz7oU+m8zLpKLo3bo5Q5qn
-# g9vABM8Vwo+BK6RNqKO2qbmTaAdGrQguV4IkfWLjVNAk3/qnRlx+xlu8TiW/bMfa
-# ToNLyXtFzk17FoGbycGuHEA2FUNvoue3cMRZlA95RvlRgpPnQc5z8ExftlRvcOl9
-# nxDge0WAZYV+9JFV+9VersR/Lc2WEi+GFSEcRiwBQKNWv3dzVWkMJYbtnNN5wVUT
-# xDgkDX9IQDiwkT/oRqydWQi6FOyf9ndvVH0QJel5wfdmgQRcIJ/5/9uqQy0ndpse
-# d/VeW53zvsUm7kpRCUHKVRaLgrYiKN/Jt5QHJgRQqOHf9xrsYfg4d8k=
+# AQEBBQAEggIAVtxfsEh2toE9nofwM5E6AcglO0anZsdnJk2u4W/2o5bJJMOc3hIo
+# +9IwAW8gzs4BatJrsgVrLZ3M3dQP0YRSpVP6dAnvec9R0jr8gwh44slDpfczMiXE
+# Unha2TPnibOgxpGy0PZbk+z3hzrdudj3b+0dmv0iPU361b64QjS1s18/xSJhJIcM
+# /qbXWJg9yD+cPs3FuATF9U5OsmZ2jzcgPiUHKI3x/K3xyUoGo/blh2LqERs5DWci
+# 3lpGqluXQZsBNMCipCvAmdR+aYMWeYBj9yL+KOr1y63u39wQiqVf6E7wTPvLxL0L
+# Kl4qD8Hv2e+ILgna913Yn2X3bKd1lLQfX0rmV/f+gS5nfeeV0sXqqo0+vOQRDqbf
+# vuxCnoYtQHe9oBPRj63mZeG94gaolDgs4Bxgc/xSjqXb/zYB3r7pIToUTnQZ5AMk
+# OPcVg0ZBe3nrAdCQmJQBPcTlIGVnAI3eg9A4hkTIQXx7B1pCR25oKER6Jv1MwRdP
+# C3+HH8cL2bksMb003VlWT5qcj4e+yg3ZRn1PxYp7EmsyDDv1d+Pn1Jhm/3oTbyIY
+# IYlzkz9iH0lFsywVv+8/qryHvBiOaxaLTtmi//xt5750O5YVpU61Ae/pxxUiXeW2
+# lHaA2Q/PnHeJK/Yrdv3uKdThWR3GaTC6r4gp73sLrd+4XCK4e33q2pc=
 # SIG # End signature block
