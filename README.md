@@ -2,7 +2,7 @@
 
 ![Windows](https://img.shields.io/badge/Windows-10%202004%2B%20%7C%2011-0078D4?logo=windows&logoColor=white)
 ![.NET](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)
-![Version](https://img.shields.io/badge/version-10.9.1--beta.5-orange)
+![Version](https://img.shields.io/badge/version-10.9.1-brightgreen)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-MQTT%20%7C%20WebSocket%20API-41BDF5?logo=homeassistant&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/15316/badge)](https://www.bestpractices.dev/projects/15316)
@@ -26,7 +26,7 @@ It is designed for Windows PCs you want to observe and control from Home Assista
 
 The .NET10 line starts at **version 10.0.0**. The classic client is a separate program: if you want to stay with it, it is still available from its own project, and the integration keeps a [`legacy` branch](https://github.com/v1k70rk4/HASS.Agent.NET10-Integration/tree/legacy) for it. Thinking about switching? See [Coming from HASS.Agent](docs/migrating.md).
 
-> **Stable:** [10.9.0](https://github.com/v1k70rk4/HASS.Agent.NET10/releases/latest) &nbsp;·&nbsp; **Beta:** [10.9.1-beta.5](https://github.com/v1k70rk4/HASS.Agent.NET10/releases/tag/v10.9.1-beta.5) &nbsp;·&nbsp; [What changed](#what-changed) &nbsp;·&nbsp; [Full changelog](CHANGELOG.md)
+> **Stable:** [10.9.1](https://github.com/v1k70rk4/HASS.Agent.NET10/releases/latest) &nbsp;·&nbsp; [What changed](#what-changed) &nbsp;·&nbsp; [Full changelog](CHANGELOG.md)
 
 ---
 
@@ -169,58 +169,47 @@ No telemetry, analytics, or usage data is collected or transmitted.
 
 ## What Changed
 
-### 10.9.1-beta.5
+### 10.9.1 — security pack
 
-> **Beta.** Out on the beta channel: tick **Beta updates** on the Danger Zone page to be offered it, or take it from the [releases page](https://github.com/v1k70rk4/HASS.Agent.NET10/releases). The current stable release is **10.9.0**, below.
+The security release after the feature release: 10.9.0 brought new things to do, 10.9.1 is about who can do them. It is what came out of CodeRabbit's AI Deep Scan of the app, a security review of the Home Assistant integration and another of the app, its installer and the release flow. Most of it is invisible. On a PC with more than one Windows user the app asks once who may use it, and an administrator's token on the HA API can be swapped for a Home Assistant user of the PC's own. Works with the Home Assistant integration **10.6.7** or newer; the HA API without an administrator's token needs the integration **10.9.1**, the new entities of 10.9.0 need **10.9.0**. Signed release.
 
-The fifth beta of 10.9.1: fixes from a security review of the app, its installer and the release flow, most of them about other users of the same PC. Nothing changes in how the app is used. Works with the integration **10.6.7** or newer; there is no new integration with this one. Signed release.
+**Who may do what on this PC**
 
-**New since beta.4**
-
-- **An update no longer approves new commands for the service.** Updating the app or installing the service approved whatever the settings asked the service to run at that moment. On a PC where every user may use the settings, any of them could put a command there and have it run as SYSTEM after the next update. Now an update keeps only what an administrator approved before, unchanged. Something new is approved only from the prompt after the settings are saved, and only exactly what that prompt showed; the prompt now lists what each command runs. An update from 10.9.0 or older, which had no approvals yet, still approves the current settings once.
-- **The settings folder can no longer be taken over.** Every user may create a folder in ProgramData, so another user could have made HASS.Agent's folder before the first install, or made it a link to a folder of their choosing, whose access rule the installer would then have set. Before setting the rule the app now removes such links and takes over what another user owns. Users may change what is in the folder, but no longer delete or replace the folder itself.
-- The Windows service downloads an update into a new folder that only administrators can use. On older Windows 10 its temp folder let other users get at the installer between the signature check and the start.
-- Setup starts the app as the user who ran it, not with administrator rights.
-- An update installer whose signing certificate has been revoked is not run.
-- Notification pictures: at most two downloads at a time, none from this PC itself or from 169.254.x.x, redirects checked one by one, nothing over 50 megapixels.
-- MQTT messages over 1 MB are ignored.
-- A command sensor's command goes to Home Assistant as a hash instead of its text: the device message stays on the broker, where any client can read it.
-- The **Test** button of the editor says when only the service is ticked: the test runs as you, the service runs it as SYSTEM.
-- Uninstalling asks whether to remove the settings, with the tokens in them.
-- [Connecting to Home Assistant](docs/connection.md#mqtt-topics) says why the MQTT login is worth keeping to yourself: whoever can log in to the broker can send the PC commands.
-
-**From beta.4**
-
-- **The HA API no longer needs an administrator's token.** The connection used Home Assistant's `fire_event` and `subscribe_events`, which only an administrator may use, so the token on the PC was one that can change everything in Home Assistant, and a PC that was broken into gave it away. With the integration 10.9.1 or newer the app uses the integration's own commands instead, which work with a token of a Home Assistant user who is not an administrator; an administrator approves such a PC once in Home Assistant. The app also only gets the commands meant for itself now, not those of every PC. An administrator's token keeps working, and with an older integration the app connects as before. **The easy way there:** when the app connects with an administrator's token, its window offers to create a Home Assistant user for this PC (not an administrator, without a password) and switches to its token; the HA API page shows whose the token is and has the same button. How it works, and the way by hand: [A Home Assistant user for the PC](docs/connection.md#a-home-assistant-user-for-the-pc).
-- **The offer comes right after an administrator's token is saved**, not only the next time the window opens: a new install, where the token is put in for the first time, is where it helps most.
-- **Fixed: after a silent first install (winget, a deployment tool) the app never asked who may use HASS.Agent on this PC.** The installer recorded "every user" as a choice nobody had made. It now leaves the settings open without recording anything, and the app asks the first time its window is opened on a PC with a user who is not an administrator.
-- The question who may use HASS.Agent on this PC now names what is at stake: the MQTT password, which opens the whole broker, and what the Home Assistant token can do. When both questions are due, the window asks one per opening: the user of the PC's own first.
-
-**From beta.3**
-
-- **A hotkey is pressed, not typed, and you see at once whether it is free.** In the hotkey editor the combination is pressed in its field (Backspace clears it). The line under it says straight away whether Windows lets HASS.Agent have it, or whether Windows or another program already uses it (the Win+number keys are the taskbar's, for one); before, that only showed in the log. It also says when another hotkey of the list has the same combination, and warns about one modifier alone (ctrl+c, alt+f4), which programs use themselves. A taken combination is kept only when OK is pressed twice; the app then tries it again every minute, so it starts working once the other program lets it go. A combination Windows keeps for itself does not even show up in the field.
-- The service no longer restarts its connection after an update. The tray app records the version it now runs in the settings, and the service took that as a change of its own settings.
-
-**From beta.2**
-
-- **A Home Assistant address typed without `http://` or `https://` gets https unless it points into the home network.** It always got plain http before, so an address on the internet (a Nabu Casa one, your own domain) sent the token unencrypted, or did not work at all. A `.local` name, a name without a dot, a private IP address and `localhost` still get http, as Home Assistant answers there by default; for anything else, plain http has to be typed.
-- **Limits on what LibreHardwareMonitor sends.** The answer is read up to 4 MB as it arrives, at most 5000 values are kept, and names are cut at 200 characters, so a broken or hostile server cannot make the app hold an unbounded amount of memory. A real one sends a few hundred values in tens of kilobytes.
-- Old notification pictures are cleaned up once an hour instead of on every notification with a picture.
-
-**From beta.1**
-
-- **Fixed: a user of the PC could have a command run as SYSTEM.** The settings live in ProgramData, where every user of the PC can write, and the Windows service (SYSTEM) ran the custom commands and command sensors set for it there. The service now runs one only when an administrator has approved it: `service-policy.json` next to the program, which only administrators can write, approves each by its id and what it runs. Installing or updating the app approves what the settings already ask the service to run, so nothing stops working; a command or command sensor added or changed for the service later asks for administrator approval (UAC) when the settings are saved. Until then the service leaves it to the tray app, and the log says which ones. Found by CodeRabbit's AI Deep Scan.
-- **Who may use HASS.Agent on this PC.** Its settings, with the Home Assistant token, the MQTT login and the commands it runs, could be read and changed by every user of the PC. They can now be limited to some users: a first install asks (*Only me* or *Every user of this PC*), and on a PC that already has HASS.Agent the app asks once, when it is opened, with the users of the PC to tick; it is also under Danger Zone, *Users of this PC*. Limiting needs an administrator (UAC) and uses a local group, *HASS.Agent Users*, that an administrator can also manage with Windows' own tools; the ticked users get access at once, without logging on again. Someone left out gets a note once, and HASS.Agent does not start for them. On a PC whose users are all administrators the update limits the settings to them by itself, which takes nothing from anyone and keeps out a user added later. On a PC with a user who is not an administrator nothing changes by itself: Home Assistant gets a notification once, and the question comes when someone opens the HASS.Agent window, never at logon.
-- **An update installer runs only when it is signed by the publisher.** The app downloaded the installer of a new release and started it without checking it, elevated, and from the service as SYSTEM. It now asks Windows to check the Authenticode signature first (unchanged since signing, a trusted certificate chain, a valid timestamp) and requires the signer to be the publisher of the releases (*Open Source Developer Viktor Révész*, issued by *Certum Code Signing 2021 CA*). Anything else, a damaged download or a release file replaced by someone else, is deleted and the update stops with the reason in the log and in Home Assistant. The publisher is checked by name rather than by certificate, so a renewed certificate keeps updates working.
-- **The local HTTP API compares the API key in constant time**, so the time an answer takes says nothing about a guessed key, and it lets nothing in if the key were ever missing from the settings (it is always generated, so this changes nothing in practice).
-- **Switched-off sensors stay at home.** A built-in sensor switched off on the Sensors page was only left out of what Home Assistant builds entities from; its value still went to the broker or the HA API with every update, the title of the active window and the logged-in user included. Only the sensors switched on for the tray app or the service are sent now, plus what the display light and the audio selects need.
-- **Notifications and media commands over the HA API follow their switches.** With notifications or the media player switched off, MQTT does not even subscribe to them, but over the HA API they were still shown or carried out. They are ignored there too now.
+- **Who may use HASS.Agent on this PC.** Its settings, with the Home Assistant token, the MQTT login and the commands it runs, could be read and changed by every user of the PC. They can now be limited to some users. A first install asks (*Only me* or *Every user of this PC*); a silent one (winget, a deployment tool) leaves the choice to the app, which asks the first time its window is opened on a PC with a user who is not an administrator. The question names what is at stake: the MQTT password, which opens the whole broker, and what the Home Assistant token can do. It is also under Danger Zone, *Users of this PC*. Limiting needs an administrator (UAC) and uses a local group, *HASS.Agent Users*, that an administrator can also manage with Windows' own tools; the ticked users get access at once, without logging on again, and someone left out gets a note once. On a PC whose users are all administrators an update limits the settings to them by itself, which takes nothing from anyone and keeps out a user added later. See [Who May Use It on This PC](docs/features.md#who-may-use-it-on-this-pc).
+- **The settings folder can no longer be taken over.** Every user may create a folder in ProgramData, so another user could have made HASS.Agent's folder before the first install, or made it a link to a folder of their choosing, whose access rule the installer would then have set. Before an administrator sets the rule, the app now removes such links and takes over what another user owns, and users may change what is in the folder but not delete or replace the folder itself.
+- **Fixed: a user of the PC could have a command run as SYSTEM.** The Windows service (SYSTEM) ran the custom commands and command sensors the settings set for it, and those settings could be written by other users. The service now runs one only when an administrator has approved it: `service-policy.json` next to the program, which only administrators can write, approves each by its id and what it runs. A command or command sensor added or changed for the service asks for administrator approval (UAC) when the settings are saved; the prompt shows each one in full, and what is approved is exactly what it showed. An update keeps what was approved before and approves nothing new; the first update from 10.9.0 or older approves the current settings once, so nothing stops working. Until it is approved the service leaves a command to the tray app, and the log says which ones. The editor's **Test** button runs it as you, never as SYSTEM, and says so when only the service is ticked. See [Commands the Service Runs](docs/features.md#commands-the-service-runs).
 - **Windows tools are started by their full path** (`sc.exe`, `schtasks.exe`, `shutdown.exe`, PowerShell and others). A bare name is looked up in the current folder first, so the app started elevated from a folder someone else can write to could run a planted copy.
-- **The update prompt only links to GitHub.** Links inside the release notes are shown as text, and only an https page on github.com is opened.
-- **The log cannot be fooled by line breaks** in text that comes from outside (a notification, an MQTT message): the lines after the first are indented, so they never look like a record of their own.
+- Setup starts the app as the user who ran it, not with administrator rights.
+- Uninstalling asks whether to remove the settings, with the tokens in them.
+
+**Home Assistant**
+
+- **The HA API no longer needs an administrator's token** (integration 10.9.1). The connection used Home Assistant's `fire_event` and `subscribe_events`, which only an administrator may use, so the token on the PC was one that can change everything in Home Assistant, and a PC that was broken into gave it away. With the integration 10.9.1 the app uses the integration's own commands instead, which work with a token of a Home Assistant user who is not an administrator; an administrator approves such a PC once in Home Assistant. The app also only gets the commands meant for itself now, not those of every PC. **The easy way there:** when the app connects with an administrator's token, right after the token is saved or when its window opens, it offers to create a Home Assistant user for this PC (not an administrator, without a password) and switches to its token; the HA API page shows whose the token is and has the same button. An administrator's token keeps working, and with an older integration the app connects as before. How it works, and the way by hand: [A Home Assistant user for the PC](docs/connection.md#a-home-assistant-user-for-the-pc).
+- **A Home Assistant address typed without `http://` or `https://` gets https unless it points into the home network.** It always got plain http before, so an address on the internet (a Nabu Casa one, your own domain) sent the token unencrypted, or did not work at all. A `.local` name, a name without a dot, a private IP address and `localhost` still get http, as Home Assistant answers there by default.
+- **Switched-off sensors stay at home.** A built-in sensor switched off on the Sensors page was only left out of what Home Assistant builds entities from; its value still went out with every update, the title of the active window and the logged-in user included. Only the sensors switched on are sent now.
+- **Notifications and media commands over the HA API follow their switches**, as they always did over MQTT.
+- **A command sensor's command goes to Home Assistant as a hash**, not as its text: the device message stays on the broker, where any client can read it.
+- **Keep the MQTT login to yourself.** Whoever can log in to the broker can send the PC commands and notifications; [Connecting to Home Assistant](docs/connection.md#mqtt-topics) says what to do about it. MQTT messages over 1 MB are ignored.
+
+**Updates**
+
+- **An update installer runs only when it is signed by the publisher.** The app downloaded the installer of a new release and started it without checking it, elevated, and from the service as SYSTEM. It now asks Windows to check the Authenticode signature first (unchanged since signing, a trusted certificate chain, a valid timestamp), requires the signer to be the publisher of the releases (*Open Source Developer Viktor Révész*, issued by *Certum Code Signing 2021 CA*), and refuses a certificate that has been revoked. Anything else, a damaged download or a release file replaced by someone else, is deleted and the update stops with the reason in the log and in Home Assistant. The publisher is checked by name rather than by certificate, so a renewed certificate keeps updates working.
+- The service downloads an update into a new folder that only administrators can use; on older Windows 10 its temp folder let other users get at the installer between the check and the start.
+- The update prompt only links to GitHub: links inside the release notes are shown as text.
 - The release signatures (Sigstore) are only made after every file in the zip has been checked: the app with the Certum signature, the bundled WebView2 and ASP.NET Core libraries with Microsoft's, and nothing else that could run.
 
-### 10.9.0
+**Also in this release**
+
+- **A hotkey is pressed, not typed, and you see at once whether it is free.** In the hotkey editor the combination is pressed in its field (Backspace clears it). The line under it says straight away whether Windows lets HASS.Agent have it, or whether Windows or another program already uses it; it also says when another hotkey of the list has the same combination, and warns about one modifier alone (ctrl+c, alt+f4). A taken combination is kept only when OK is pressed twice; the app then tries it again every minute, so it starts working once the other program lets it go.
+- The service no longer restarts its connection after an update.
+- **The broker drops the PC with "malformed packet"?** On one PC with a Realtek 2.5G network card it was the card's Large Send Offload; [Connecting to Home Assistant](docs/connection.md#mqtt-topics) says how to switch it off.
+- The local HTTP API compares the API key in constant time, and a new one comes from the cryptographic random generator.
+- Notification pictures: at most two downloads at a time, none from this PC itself, redirects checked one by one, nothing over 50 megapixels; old ones are cleaned up once an hour.
+- Limits on what LibreHardwareMonitor sends: at most 4 MB and 5000 values are read.
+- The log cannot be fooled by line breaks in text that comes from outside (a notification, an MQTT message).
+- A [contributing guide](CONTRIBUTING.md), and the project has the [OpenSSF Best Practices](https://www.bestpractices.dev/projects/15316) passing badge.
+
+### 10.9.0 — feature pack
 
 A bigger release than the step in the version number suggests: notifications rebuilt on Windows notifications, the display as a light, audio device selects, hotkeys, per-app volume, hardware sensors through LibreHardwareMonitor, a new website and documentation, and the fixes of three betas. Works with the Home Assistant integration **10.6.7** or newer; the new entities (display light, audio selects, hotkeys, `set_app_volume`) and the notification fields need the integration **10.9.0**. Signed release.
 
@@ -259,19 +248,6 @@ A bigger release than the step in the version number suggests: notifications reb
 
 - **A *Star on GitHub* button on the About page**, next to the coffee one. The only place the app asks for it.
 - **New website and documentation.** The README is short now and the details live under `docs/`: [Features](docs/features.md), [Commands](docs/commands.md), [Sensors](docs/sensors.md), [Connection](docs/connection.md) and a [Coming from HASS.Agent](docs/migrating.md) page for people who know the classic client. The [website](https://v1k70rk4.github.io/HASS.Agent.NET10/) shows what Home Assistant sees and what the notifications look like.
-
-<details>
-<summary><b>10.8.0</b></summary>
-
-### 10.8.0
-
-Works with the Home Assistant integration **10.6.7** or newer. Signed release.
-
-- **Custom commands and custom sensors get an editor window.** Adding one, or double-clicking a row, opens a window with room for a long command line, a description and an example for the chosen type, a *Browse* button for programs and scripts, and a *Test* button: a command runs right away and says what went wrong if it did, a sensor shows the value it would report. For sensors the parameter field also lists what the PC has: the running processes, the installed services, the drives, or the attributes of the built-in sensors. The tables on the settings pages are now just the overview, with the ticks still one click away.
-- **Dashboard popup (WebView).** A Home Assistant dashboard, or any web page, in a small window above the tray: set its address and size on the **Capabilities** page, then open it from the tray menu, or with a click on the tray icon if you tick that. It closes when you click elsewhere, and nothing is loaded while it is closed. There is a matching custom command type, *Popup window (WebView)*, that shows a page in a window of its own, for example a camera when the doorbell rings. Both use the WebView2 runtime that ships with Windows 11; the login is kept per Windows user. Off until an address is set.
-- **Two new custom command types: *Key press* and *Open address*.** A custom command can now press keys (`win+r`, `ctrl+shift+esc`, `alt+tab`, media and browser keys, or several combinations in a row) or open a link in the default browser, without a script written for it. Both show up in Home Assistant as buttons like any other custom command, and both run in the tray app, since they act on the desktop of the logged-in user. The key names are listed under [Custom Commands](docs/commands.md#custom-commands).
-
-</details>
 
 Older versions are in the [changelog](CHANGELOG.md).
 
