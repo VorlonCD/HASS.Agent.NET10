@@ -22,7 +22,8 @@ internal sealed class CameraActivityMonitor : IDisposable
     private bool _mfStarted;
     private bool _unavailable;
     private bool _disposed;
-    private volatile IReadOnlyList<int> _streaming = [];
+    // Null while the last report could not be read.
+    private volatile IReadOnlyList<int>? _streaming = [];
 
     public CameraActivityMonitor(FileLog log)
     {
@@ -30,8 +31,9 @@ internal sealed class CameraActivityMonitor : IDisposable
     }
 
     /// <summary>
-    /// The streaming process ids, or null when the monitor can't run on this PC (the caller
-    /// falls back to the older source). Starts the monitor on first use.
+    /// The streaming process ids, or null when the monitor can't run on this PC or its last
+    /// report could not be read (the caller falls back to the older source). Starts the
+    /// monitor on first use.
     /// </summary>
     public IReadOnlyList<int>? GetStreamingProcessIds()
     {
@@ -159,7 +161,10 @@ internal sealed class CameraActivityMonitor : IDisposable
         }
         catch (COMException ex)
         {
+            // The last good report may no longer be true: until the next one is read, the
+            // sensor falls back to the privacy record rather than keep a stale answer.
             _log.Warning($"Unable to read a camera activity report: {ex.Message}");
+            _streaming = null;
             return;
         }
 
