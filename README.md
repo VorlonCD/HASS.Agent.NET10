@@ -2,7 +2,7 @@
 
 ![Windows](https://img.shields.io/badge/Windows-10%202004%2B%20%7C%2011-0078D4?logo=windows&logoColor=white)
 ![.NET](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)
-![Version](https://img.shields.io/badge/version-10.9.1-brightgreen)
+![Version](https://img.shields.io/badge/version-10.9.2-brightgreen)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-MQTT%20%7C%20WebSocket%20API-41BDF5?logo=homeassistant&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/15316/badge)](https://www.bestpractices.dev/projects/15316)
@@ -26,7 +26,7 @@ It is designed for Windows PCs you want to observe and control from Home Assista
 
 The .NET10 line starts at **version 10.0.0**. The classic client is a separate program: if you want to stay with it, it is still available from its own project, and the integration keeps a [`legacy` branch](https://github.com/v1k70rk4/HASS.Agent.NET10-Integration/tree/legacy) for it. Thinking about switching? See [Coming from HASS.Agent](docs/migrating.md).
 
-> **Stable:** [10.9.1](https://github.com/v1k70rk4/HASS.Agent.NET10/releases/latest) &nbsp;·&nbsp; [What changed](#what-changed) &nbsp;·&nbsp; [Full changelog](CHANGELOG.md)
+> **Stable:** [10.9.2](https://github.com/v1k70rk4/HASS.Agent.NET10/releases/latest) &nbsp;·&nbsp; [What changed](#what-changed) &nbsp;·&nbsp; [Full changelog](CHANGELOG.md)
 
 ---
 
@@ -168,6 +168,12 @@ No telemetry, analytics, or usage data is collected or transmitted.
 ---
 
 ## What Changed
+
+### 10.9.2 — hotfix
+
+Camera and microphone on Windows 11 26H2. Works with the Home Assistant integration **10.6.7** or newer. Signed release.
+
+- **Fixed: Camera in use and Microphone in use stayed off on Windows 11 26H2.** Both read the record behind the Windows privacy indicator, and 26H2 no longer keeps it up to date. Microsoft switches this on gradually, so a PC can be fine for days after the update and then lose both sensors. The camera is now read from Windows' camera stack and the microphone from the apps recording on any input device. The `apps` attribute keeps the same names (the package for a Store app, the exe for a desktop app), so automations need no change.
 
 ### 10.9.1 — security pack
 

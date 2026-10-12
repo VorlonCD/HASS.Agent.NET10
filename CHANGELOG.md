@@ -2,6 +2,12 @@
 
 Every release of HASS.Agent .NET10, newest first. The downloads are on the [releases page](https://github.com/v1k70rk4/HASS.Agent.NET10/releases).
 
+## 10.9.2
+
+Hotfix: camera and microphone on Windows 11 26H2. Works with the Home Assistant integration **10.6.7** or newer. Signed release.
+
+- **Fixed: Camera in use and Microphone in use stayed off on Windows 11 26H2.** Both read the record behind the Windows privacy indicator, and 26H2 no longer keeps it up to date. Microsoft switches this on gradually, so a PC can be fine for days after the update and then lose both sensors. The camera is now read from Windows' camera stack and the microphone from the apps recording on any input device. The `apps` attribute keeps the same names (the package for a Store app, the exe for a desktop app), so automations need no change.
+
 ## 10.9.1
 
 The security release after the feature release: 10.9.0 brought new things to do, 10.9.1 is about who can do them. It is what came out of CodeRabbit's AI Deep Scan of the app, a security review of the Home Assistant integration and another of the app, its installer and the release flow. Most of it is invisible. On a PC with more than one Windows user the app asks once who may use it, and an administrator's token on the HA API can be swapped for a Home Assistant user of the PC's own. Works with the Home Assistant integration **10.6.7** or newer; the HA API without an administrator's token needs the integration **10.9.1**, the new entities of 10.9.0 need **10.9.0**. Signed release.
