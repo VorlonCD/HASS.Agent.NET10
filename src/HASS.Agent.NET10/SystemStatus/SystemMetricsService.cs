@@ -64,6 +64,7 @@ internal sealed class SystemMetricsService : IDisposable
     private readonly FileLog _log;
     private readonly AudioEndpointService? _audioEndpointService;
     private readonly MonitorPowerStateService? _monitorPowerStateService;
+    private readonly CameraActivityMonitor? _cameraActivityMonitor;
     private readonly bool _includeInteractiveMetrics;
     private ulong? _lastIdleTime;
     private ulong? _lastKernelTime;
@@ -107,6 +108,9 @@ internal sealed class SystemMetricsService : IDisposable
         _audioEndpointService = audioEndpointService;
         _monitorPowerStateService = monitorPowerStateService;
         _includeInteractiveMetrics = includeInteractiveMetrics;
+
+        // Starts on the first read of the Camera in use sensor, not here.
+        _cameraActivityMonitor = includeInteractiveMetrics ? new CameraActivityMonitor(log) : null;
     }
 
     public SystemMetricsMessage Read(
@@ -187,12 +191,13 @@ internal sealed class SystemMetricsService : IDisposable
             }
         }
 
-        // Tray app only: Windows keeps the usage record in the signed-in user's hive, and the
-        // service's HKCU is SYSTEM's. Null (never read) keeps both sensors out of the payload.
+        // Tray app only: the privacy record the older source reads lives in the signed-in
+        // user's hive, and the service's HKCU is SYSTEM's. Null (never read) keeps both
+        // sensors out of the payload.
         if (updateFast && _includeInteractiveMetrics)
         {
-            _lastCameraApps = Wanted("camera_in_use") ? Safe(() => ReadCapabilityUsers("webcam"), _lastCameraApps) : null;
-            _lastMicrophoneApps = Wanted("microphone_in_use") ? Safe(() => ReadCapabilityUsers("microphone"), _lastMicrophoneApps) : null;
+            _lastCameraApps = Wanted("camera_in_use") ? Safe(ReadCameraUsers, _lastCameraApps) : null;
+            _lastMicrophoneApps = Wanted("microphone_in_use") ? Safe(ReadMicrophoneUsers, _lastMicrophoneApps) : null;
         }
 
         // The device lists behind the integration's audio selects; only for a sensor that is on.
@@ -338,6 +343,7 @@ internal sealed class SystemMetricsService : IDisposable
     public void Dispose()
     {
         StopWakeWatcher();
+        _cameraActivityMonitor?.Dispose();
     }
 
     private void StopWakeWatcher()
@@ -1021,6 +1027,73 @@ internal sealed class SystemMetricsService : IDisposable
             "service" when detail is not null => LimitState(detail),
             _ => LimitState(Path.GetFileName(main))
         };
+    }
+
+    // Windows 11 26H2 stopped keeping the privacy record below up to date (behind a feature
+    // flag that Microsoft turns on gradually), so the apps are taken from the camera and
+    // audio stacks themselves. The record stays as the fallback for when those can't be read.
+    private IReadOnlyList<string> ReadCameraUsers()
+    {
+        var processIds = _cameraActivityMonitor?.GetStreamingProcessIds();
+        return processIds is null ? ReadCapabilityUsers("webcam") : CaptureAppNames(processIds);
+    }
+
+    private IReadOnlyList<string> ReadMicrophoneUsers()
+    {
+        var processIds = _audioEndpointService?.GetCapturingProcessIds();
+        return processIds is null ? ReadCapabilityUsers("microphone") : CaptureAppNames(processIds);
+    }
+
+    // Named the way the privacy record names them, so the apps attribute keeps its values:
+    // a Store app by its package (MSTeams), a desktop app by its file (msedge.exe).
+    private static IReadOnlyList<string> CaptureAppNames(IReadOnlyList<int> processIds)
+    {
+        var apps = new List<string>();
+        foreach (var processId in processIds)
+        {
+            var name = CaptureAppName(processId);
+            if (name is not null)
+            {
+                apps.Add(LimitState(name));
+            }
+        }
+
+        return apps
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(MaxCapabilityApps)
+            .ToList();
+    }
+
+    private static string? CaptureAppName(int processId)
+    {
+        var process = OpenProcess(ProcessQueryLimitedInformation, false, (uint)processId);
+        if (process == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        try
+        {
+            var length = 256u;
+            var buffer = new StringBuilder((int)length);
+            if (GetPackageFamilyName(process, ref length, buffer) == 0)
+            {
+                // Microsoft.WindowsCamera_8wekyb3d8bbwe -> Microsoft.WindowsCamera
+                var family = buffer.ToString();
+                var publisherStart = family.LastIndexOf('_');
+                return publisherStart > 0 ? family[..publisherStart] : family;
+            }
+
+            length = 1024;
+            buffer = new StringBuilder((int)length);
+            return QueryFullProcessImageName(process, 0, buffer, ref length)
+                ? Path.GetFileName(buffer.ToString())
+                : null;
+        }
+        finally
+        {
+            CloseHandle(process);
+        }
     }
 
     /// <summary>
@@ -2153,6 +2226,21 @@ internal sealed class SystemMetricsService : IDisposable
 
     [DllImport("kernel32.dll")]
     private static extern uint WTSGetActiveConsoleSessionId();
+
+    private const uint ProcessQueryLimitedInformation = 0x1000;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    // 0 (ERROR_SUCCESS) for a packaged process; APPMODEL_ERROR_NO_PACKAGE for a desktop one.
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetPackageFamilyName(IntPtr process, ref uint length, StringBuilder familyName);
+
+    [DllImport("kernel32.dll", EntryPoint = "QueryFullProcessImageNameW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool QueryFullProcessImageName(IntPtr process, uint flags, StringBuilder exeName, ref uint size);
 
     [DllImport("wtsapi32.dll", EntryPoint = "WTSQuerySessionInformationW", SetLastError = true)]
     private static extern bool WTSQuerySessionInformation(

@@ -20,6 +20,7 @@ internal sealed class AudioEndpointService : IDisposable
     // it ends rather than on every read.
     private const int NoDefaultDevice = unchecked((int)0x80070490);
     private bool _noRenderDevice;
+    private bool _captureSessionsFailed;
 
     public AudioEndpointService(FileLog log)
     {
@@ -218,6 +219,53 @@ internal sealed class AudioEndpointService : IDisposable
             }
 
             return sessions;
+        }
+    }
+
+    /// <summary>
+    /// The processes recording from any microphone right now: an active session on a
+    /// recording device. Null when the sessions could not be read.
+    /// </summary>
+    public IReadOnlyList<int>? GetCapturingProcessIds()
+    {
+        lock (_gate)
+        {
+            try
+            {
+                if (_disposed) return null;
+                var processIds = new HashSet<int>();
+                foreach (var device in _enumerator.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active))
+                {
+                    using (device)
+                    {
+                        var collection = device.AudioSessionManager.Sessions;
+                        for (var index = 0; index < collection.Count; index++)
+                        {
+                            using var session = collection[index];
+                            if (session.State == AudioSessionState.AudioSessionStateActive
+                                && !session.IsSystemSoundsSession
+                                && (int)session.GetProcessID is > 0 and var processId)
+                            {
+                                processIds.Add(processId);
+                            }
+                        }
+                    }
+                }
+
+                _captureSessionsFailed = false;
+                return processIds.ToList();
+            }
+            catch (Exception ex)
+            {
+                // Read on every fast cycle: logged when it starts failing, not each time.
+                if (!_captureSessionsFailed)
+                {
+                    _captureSessionsFailed = true;
+                    _log.Warning($"Unable to list recording sessions: {ex.Message}");
+                }
+
+                return null;
+            }
         }
     }
 
