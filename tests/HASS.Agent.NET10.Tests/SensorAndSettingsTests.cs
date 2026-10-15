@@ -72,6 +72,18 @@ public class LibreHardwareMonitorTests
     }
 }
 
+public class SessionLockedTests
+{
+    [Theory]
+    [InlineData(0, true)]    // WTS_SESSIONSTATE_LOCK
+    [InlineData(1, false)]   // WTS_SESSIONSTATE_UNLOCK
+    [InlineData(-1, null)]   // WTS_SESSIONSTATE_UNKNOWN
+    public void Session_flags_say_whether_the_session_is_locked(int flags, bool? locked)
+    {
+        Assert.Equal(locked, SystemMetricsService.SessionLockedFromFlags(flags));
+    }
+}
+
 public class SettingsTests
 {
     [Fact]

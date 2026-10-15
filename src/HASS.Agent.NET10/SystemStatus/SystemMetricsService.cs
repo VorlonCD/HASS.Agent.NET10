@@ -801,21 +801,57 @@ internal sealed class SystemMetricsService : IDisposable
         }
     }
 
+    // Whether this session is locked, as Windows keeps it for the session itself
+    // (WTSSessionInfoEx). The input desktop was read before: Windows 11 shows the lock
+    // screen on the user's own desktop, so it read as locked only for a moment while the
+    // lock screen came up and the sensor fell back to unlocked within seconds.
     private static bool? ReadSessionLocked()
     {
-        var desktop = OpenInputDesktop(0, false, DesktopSwitchDesktop);
-        if (desktop == IntPtr.Zero)
+        using var current = Process.GetCurrentProcess();
+        var sessionId = (uint)current.SessionId;
+        if (!WTSQuerySessionInformation(IntPtr.Zero, sessionId, WtsInfoClass.SessionInfoEx, out var buffer, out var bytesReturned))
         {
-            return true;
+            return IsLogonUiRunning(sessionId);
         }
 
         try
         {
-            return false;
+            if (bytesReturned < WtsInfoExFlagsOffset + sizeof(int) || Marshal.ReadInt32(buffer) != 1)
+            {
+                return IsLogonUiRunning(sessionId);
+            }
+
+            return SessionLockedFromFlags(Marshal.ReadInt32(buffer, WtsInfoExFlagsOffset)) ?? IsLogonUiRunning(sessionId);
         }
         finally
         {
-            _ = CloseDesktop(desktop);
+            WTSFreeMemory(buffer);
+        }
+    }
+
+    // WTS_SESSIONSTATE_LOCK (0) and WTS_SESSIONSTATE_UNLOCK (1); anything else is unknown.
+    // (Windows 7 had the two the other way round; this app needs Windows 10.)
+    internal static bool? SessionLockedFromFlags(int sessionFlags) => sessionFlags switch
+    {
+        0 => true,
+        1 => false,
+        _ => null
+    };
+
+    // The fallback: the lock screen's credential UI runs in the session only while it is locked.
+    private static bool IsLogonUiRunning(uint sessionId)
+    {
+        var processes = Process.GetProcessesByName("LogonUI");
+        try
+        {
+            return processes.Any(process => process.SessionId == sessionId);
+        }
+        finally
+        {
+            foreach (var process in processes)
+            {
+                process.Dispose();
+            }
         }
     }
 
@@ -2218,12 +2254,6 @@ internal sealed class SystemMetricsService : IDisposable
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetLastInputInfo(ref LastInputInfo lastInputInfo);
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint desiredAccess);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool CloseDesktop(IntPtr desktop);
-
     [DllImport("kernel32.dll")]
     private static extern uint WTSGetActiveConsoleSessionId();
 
@@ -2311,8 +2341,13 @@ internal sealed class SystemMetricsService : IDisposable
         UserName = 5,
         DomainName = 7,
         ConnectState = 8,
-        ClientProtocolType = 16
+        ClientProtocolType = 16,
+        SessionInfoEx = 25
     }
+
+    // WTSINFOEXW: a DWORD Level, then the level 1 data, which holds LARGE_INTEGERs and so
+    // starts at 8: SessionId, SessionState, then SessionFlags.
+    private const int WtsInfoExFlagsOffset = 16;
 
     private enum WtsConnectState
     {
@@ -2335,8 +2370,6 @@ internal sealed class SystemMetricsService : IDisposable
         public IntPtr WinStationName;
         public WtsConnectState State;
     }
-
-    private const uint DesktopSwitchDesktop = 0x0100;
 }
 
 internal sealed record SystemMetricsMessage(
