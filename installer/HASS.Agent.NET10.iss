@@ -1,5 +1,5 @@
 ﻿#ifndef MyAppVersion
-#define MyAppVersion "10.9.3-beta.1"
+#define MyAppVersion "10.9.3-vorlon.1"
 #endif
 
 ; The file version resource takes numbers only: a pre-release ("10.9.0-beta.1") keeps its
@@ -12,7 +12,7 @@
 
 #define MyAppName "HASS.Agent .NET10"
 #define MyAppExeName "HASS.Agent.NET10.exe"
-#define MyAppPublisher "v1k70rk4"
+#define MyAppPublisher "VorlonCD (based on v1k70rk4)"
 
 [Setup]
 AppId={{8E71E6C1-B215-4C54-B8A5-A7172D7CF3D2}
@@ -101,7 +101,7 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#MyAppName} Local API"""; Flags: runhidden waituntilterminated; StatusMsg: "{cm:StatusFirewall}"
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""{#MyAppName} Local API"" dir=in action=allow protocol=TCP localport=5115 profile=private program=""{app}\{#MyAppExeName}"" enable=yes"; Flags: runhidden waituntilterminated; StatusMsg: "{cm:StatusFirewall}"
+; K4 uses authenticated MQTT. The local API binds loopback; do not open an inbound port.
 
 [UninstallRun]
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--stop-service --quiet"; Flags: runhidden waituntilterminated skipifdoesntexist

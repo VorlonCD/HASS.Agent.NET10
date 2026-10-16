@@ -1,3 +1,4 @@
+using HASS.Agent.Companion.Announcements;
 using HASS.Agent.Companion.Configuration;
 using HASS.Agent.Companion.Http;
 using HASS.Agent.Companion.Logging;
@@ -25,6 +26,7 @@ internal static class Program
     private static void Main()
     {
         var args = Environment.GetCommandLineArgs().Skip(1).ToArray();
+        if (AnnouncementRecovery.TryHandleCommandLine(args)) return;
         if (args.Any(arg => string.Equals(arg, "--exit", StringComparison.OrdinalIgnoreCase)))
         {
             SignalExistingInstanceToExit();
@@ -161,7 +163,12 @@ internal static class Program
         using var monitorPowerStateService = new MonitorPowerStateService();
         using var sessionPowerWatcher = new SessionPowerWatcher();
         using var audioEndpointService = new AudioEndpointService(log);
-        using var mediaSessionService = new MediaSessionService(log, audioEndpointService);
+        using var announcementAudio = new WindowsAnnouncementAudioController(log);
+        using var announcementMedia = new AnnouncementMediaPreparer(settings.AnnouncementMediaOrigins.Select(origin => new Uri(origin)));
+        MqttCompanionService? announcementPublisher = null;
+        var announcements = new AnnouncementCoordinator(announcementMedia, announcementAudio,
+            result => announcementPublisher?.PublishAnnouncementResultAsync(result) ?? Task.CompletedTask);
+        using var mediaSessionService = new MediaSessionService(log, audioEndpointService, announcements);
         using var systemMetricsService = new SystemMetricsService(log, monitorPowerStateService, audioEndpointService);
         using var systemCommandService = new SystemCommandService(log, audioEndpointService);
         using var mqttService = new MqttCompanionService(
@@ -172,6 +179,8 @@ internal static class Program
             systemCommandService,
             CompanionRuntimeRole.App,
             log);
+        announcementPublisher = mqttService;
+        mqttService.Announcements = announcements;
         using var localApi = new LocalApiServer(settings, trayContext, log);
 
         // Event-driven sensor pushes: interactive state changes publish immediately
@@ -252,11 +261,17 @@ internal static class Program
             });
         }
 
-        Application.Run(trayContext);
-        exitRegistration.Unregister(null);
-
-        mqttService.StopAsync().GetAwaiter().GetResult();
-        localApi.StopAsync().GetAwaiter().GetResult();
+        try
+        {
+            Application.Run(trayContext);
+        }
+        finally
+        {
+            announcements.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            exitRegistration.Unregister(null);
+            mqttService.StopAsync().GetAwaiter().GetResult();
+            localApi.StopAsync().GetAwaiter().GetResult();
+        }
         log.Info($"Stopped {AppIdentity.DisplayName}.");
     }
 

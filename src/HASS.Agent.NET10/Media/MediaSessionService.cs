@@ -2,6 +2,7 @@ using System.Runtime.InteropServices.WindowsRuntime;
 using System.Security.Cryptography;
 using System.Text.Json;
 using HASS.Agent.Companion.Logging;
+using HASS.Agent.Companion.Announcements;
 using Windows.Foundation;
 using Windows.Graphics.Imaging;
 using Windows.Media.Control;
@@ -14,6 +15,7 @@ internal sealed class MediaSessionService : IDisposable
 {
     private readonly FileLog _log;
     private readonly AudioEndpointService _audioEndpoint;
+    private readonly AnnouncementCoordinator? _announcements;
     private GlobalSystemMediaTransportControlsSessionManager? _sessionManager;
     private MediaPlayer? _localPlayer;
     private CancellationTokenSource? _cts;
@@ -30,10 +32,11 @@ internal sealed class MediaSessionService : IDisposable
     // The audio endpoint is shared with SystemMetricsService: two instances would
     // each create their own WASAPI COM objects and deadlock against each other
     // during an audio device change (e.g. monitor power-off dropping HDMI audio).
-    public MediaSessionService(FileLog log, AudioEndpointService audioEndpoint)
+    public MediaSessionService(FileLog log, AudioEndpointService audioEndpoint, AnnouncementCoordinator? announcements = null)
     {
         _log = log;
         _audioEndpoint = audioEndpoint;
+        _announcements = announcements;
     }
 
     public async Task StartAsync(Func<MediaStateMessage, Task> publishState, Func<byte[]?, Task>? publishThumbnail, CancellationToken cancellationToken)
@@ -134,14 +137,15 @@ internal sealed class MediaSessionService : IDisposable
                 }
                 break;
             case "mute":
-                if (TryGetBool(command.Data, out var muted))
+                if (!TryParseMuteRequest(command.Data, out var muted))
                 {
-                    _audioEndpoint.SetMuted(muted);
+                    _log.Warning("Rejected invalid explicit mute state.");
                 }
                 else
-                {
-                    MediaKeySender.MuteToggle();
-                }
+                    _audioEndpoint.SetMuted(muted!.Value);
+                break;
+            case "togglemute":
+                MediaKeySender.MuteToggle();
                 break;
             case "play":
                 if (session is not null)
@@ -164,6 +168,7 @@ internal sealed class MediaSessionService : IDisposable
                 }
                 break;
             case "stop":
+                if (_announcements?.CancelCurrent() == true) break;
                 if (session is not null)
                 {
                     await session.TryStopAsync();
@@ -426,6 +431,8 @@ internal sealed class MediaSessionService : IDisposable
         }
 
         _localPlayer ??= new MediaPlayer();
+        _audioEndpoint.SetVolume(100);
+        _localPlayer.Volume = 1.0;
         _localPlayer.Source = MediaSource.CreateFromUri(uri);
         _localPlayer.Play();
     }
@@ -462,17 +469,21 @@ internal sealed class MediaSessionService : IDisposable
         return double.TryParse(value?.ToString(), out result);
     }
 
-    private static bool TryGetBool(object? value, out bool result)
+    internal static bool TryParseMuteRequest(object? value, out bool? muted)
     {
+        muted = null;
+        if (value is null || value is JsonElement { ValueKind: JsonValueKind.Null or JsonValueKind.Undefined }) return false;
         if (value is JsonElement json)
         {
             if (json.ValueKind is JsonValueKind.True or JsonValueKind.False)
             {
-                result = json.GetBoolean();
+                muted = json.GetBoolean();
                 return true;
             }
         }
 
-        return bool.TryParse(value?.ToString(), out result);
+        if (!bool.TryParse(value.ToString(), out var result)) return false;
+        muted = result;
+        return true;
     }
 }

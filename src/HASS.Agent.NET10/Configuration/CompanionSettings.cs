@@ -15,7 +15,7 @@ internal sealed class CompanionSettings
 
     public string SerialNumber { get; set; } = string.Empty;
 
-    public string BindHost { get; set; } = "0.0.0.0";
+    public string BindHost { get; set; } = "127.0.0.1";
 
     public int Port { get; set; } = 5115;
 
@@ -26,6 +26,9 @@ internal sealed class CompanionSettings
     public bool DangerZoneEnabled { get; set; }
 
     public bool BetaUpdatesEnabled { get; set; }
+
+    /// <summary>Exact HA origins permitted to serve announcement speech and chimes.</summary>
+    public List<string> AnnouncementMediaOrigins { get; set; } = [];
 
     // Someone answered "who may use HASS.Agent on this PC" (SettingsAccessForm): not asked again.
     public bool SettingsAccessDecided { get; set; }
@@ -96,7 +99,7 @@ internal sealed class CompanionSettings
         return "en";
     }
 
-    public string Manufacturer { get; set; } = "v1k70rk4";
+    public string Manufacturer { get; set; } = "VorlonCD";
 
     public string Model { get; set; } = AppIdentity.DisplayName;
 
@@ -254,12 +257,8 @@ internal sealed class CompanionSettings
     public void Normalize()
     {
         DeviceName = NormalizeText(DeviceName, Environment.MachineName);
-        BindHost = NormalizeText(BindHost, "0.0.0.0");
-        if (BindHost is "127.0.0.1" or "localhost")
-        {
-            BindHost = "0.0.0.0";
-        }
-        Manufacturer = NormalizeText(Manufacturer, "v1k70rk4");
+        BindHost = NormalizeText(BindHost, "127.0.0.1");
+        Manufacturer = NormalizeText(Manufacturer, "VorlonCD");
         Model = NormalizeText(Model, AppIdentity.DisplayName);
         SoftwareVersion = GetSoftwareVersion();
         MqttHost = NormalizeText(MqttHost, "homeassistant.local");

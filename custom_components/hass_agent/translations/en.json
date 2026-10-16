@@ -1,0 +1,268 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "Add HASS.Agent device",
+        "description": "PCs on MQTT are discovered automatically, and so are further PCs on the HA API once the integration has a device. Choose a manual connection method below.",
+        "menu_options": {
+          "ha_api_info": "HA API (WebSocket)",
+          "local_api": "Local HTTP API (notifications only)"
+        }
+      },
+      "confirm": {
+        "title": "Confirm",
+        "description": "Do you want to start set up?"
+      },
+      "local_api": {
+        "title": "HASS.Agent .NET10 Local HTTP API",
+        "description": "This adds the device to HA using the local HTTP API. Only notifications are supported. Use MQTT or HA API for full functionality.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "ssl": "Use SSL",
+          "api_key": "API key (from agent General settings)"
+        }
+      },
+      "ha_api_info": {
+        "title": "Connect over the HA API",
+        "description": "Make sure HASS.Agent .NET10 is running on the PC and set to use the **HA API** connection.\n\nThen open the app, go to **Danger Zone** and press **Republish discovery** — or simply restart the app.\n\nPress **Submit** here once you have done that, and the PC will be added."
+      },
+      "switch_to_mqtt": {
+        "title": "Switch to MQTT",
+        "description": "**{current}** is set up over the HA API or the local HTTP API, and now announces itself over MQTT as **{name}**. Switch it to MQTT?\n\nOnly do this if you turned on MQTT in the Windows app yourself. Anything that can publish to your MQTT broker can send such an announcement."
+      },
+      "approve_user": {
+        "title": "Allow a Home Assistant user",
+        "description": "**{name}** wants to connect with the Home Assistant user **{user}**, who is not an administrator. Allow it?\n\nOnly do this if you created that user's token for this PC yourself. Anyone with a token can claim to be a PC."
+      },
+      "confirm_user": {
+        "title": "Add a PC with its own Home Assistant user",
+        "description": "**{name}** wants to be added, connecting with the Home Assistant user **{user}**, who is not an administrator. Add it?\n\nOnly do this if you created that user's token for this PC yourself. Anyone with a token can claim to be a PC."
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect",
+      "no_discovery": "No PC announced itself yet. Press **Republish discovery** in the Windows app (Danger Zone), then try again."
+    },
+    "abort": {
+      "already_configured": "Device is already configured.",
+      "legacy_client": "This PC runs the original HASS.Agent, which this integration does not support. Update the Windows client to HASS.Agent .NET10.",
+      "switched_to_mqtt": "The PC now uses MQTT.",
+      "not_supported": "This message did not come from a HASS.Agent .NET10 client, or it is incomplete.",
+      "user_approved": "The PC can now connect as {user}."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "default_notification_title": "Default notification title. Space to disable."
+        },
+        "title": "Configure HASS.Agent .NET10"
+      }
+    }
+  },
+  "device_automation": {
+    "trigger_type": {
+      "notifications_mqtt": "When a notification with a specific action has been pressed (MQTT)",
+      "notifications_event": "When a notification with a specific action has been pressed (Event)"
+    }
+  },
+  "entity": {
+    "event": {
+      "notification_action": {
+        "name": "Notification actions"
+      },
+      "hotkey": {
+        "name": "Hotkeys"
+      }
+    },
+    "select": {
+      "audio_output": {
+        "name": "Audio output"
+      },
+      "audio_input": {
+        "name": "Audio input"
+      }
+    },
+    "light": {
+      "display": {
+        "name": "Display"
+      }
+    },
+    "button": {
+      "update_check": {
+        "name": "Check for updates"
+      }
+    }
+  },
+  "issues": {
+    "restart_required": {
+      "title": "Device renamed - restart required",
+      "fix_flow": {
+        "step": {
+          "confirm_restart": {
+            "title": "Restart required",
+            "description": "Device name has been changed, restart of Home Assistant is required to properly reload notify service for {name}, click submit to restart now."
+          }
+        }
+      }
+    },
+    "legacy_client": {
+      "title": "{name} runs the old HASS.Agent",
+      "description": "**{name}** runs HASS.Agent {version}, the original Windows client. This integration is made for **HASS.Agent .NET10** and cannot talk to the old client, so this PC was not added. Nothing on the PC was changed.\n\nTwo ways forward:\n\n- **Update the Windows client** to HASS.Agent .NET10 (recommended) — see **Learn more** below. Once it is updated, this notice disappears and the PC is discovered again.\n- **Keep the old client for now** and go back to the last legacy release of this integration: in HACS open *HASS.Agent .NET10 Integration*, choose *Redownload* and pick version `v3.0.2`. That line still works with the old client, but it is no longer maintained.\n\nIf something goes wrong with the switch, the README and the issue tracker are linked from the project page under Learn more."
+    },
+    "outdated_client": {
+      "title": "{name} needs a newer HASS.Agent .NET10",
+      "description": "**{name}** runs HASS.Agent .NET10 {version}, but this integration needs **{minimum}** or newer. Some features will not work until the Windows client is updated — see **Learn more** below. This notice disappears once it is."
+    }
+  },
+  "services": {
+    "announce": {
+      "name": "Announce on PC",
+      "description": "Speaks text on a Windows PC using Home Assistant text-to-speech.",
+      "fields": {
+        "device_name": {
+          "name": "Device name",
+          "description": "The Windows device, as named in the client."
+        },
+        "message": {
+          "name": "Message",
+          "description": "The text to speak."
+        },
+        "priority": {
+          "name": "Priority",
+          "description": "How the Windows client handles this announcement."
+        },
+        "tts_entity_id": {
+          "name": "Text-to-speech voice",
+          "description": "The Home Assistant text-to-speech entity used to create the speech audio."
+        },
+        "chime_media_id": {
+          "name": "Chime media source ID",
+          "description": "Optional Home Assistant media-source ID to play before speaking."
+        }
+      }
+    },
+    "send_notification": {
+      "name": "Send notification",
+      "description": "Shows a notification on the Windows PC, with an optional picture, buttons and text fields.",
+      "fields": {
+        "message": {
+          "name": "Message",
+          "description": "The text of the notification."
+        },
+        "title": {
+          "name": "Title",
+          "description": "The title. Without it the default title from the integration's options is used."
+        },
+        "image": {
+          "name": "Picture",
+          "description": "A camera or image entity (camera.front_door), a path on this Home Assistant (/local/doorbell.jpg), or a web address. Client 10.9.0+."
+        },
+        "actions": {
+          "name": "Buttons",
+          "description": "Up to five buttons. The action of the pressed one comes back in the Notification actions event."
+        },
+        "inputs": {
+          "name": "Text fields",
+          "description": "Up to five text fields. What was typed comes back with the pressed button, in input, by id. Client 10.9.0+."
+        },
+        "style": {
+          "name": "Style",
+          "description": "How this notification is shown. Without it the setting in the Windows client decides. Client 10.9.0+."
+        },
+        "duration": {
+          "name": "Duration",
+          "description": "Seconds on screen, 1 to 60. A Windows notification knows a short and a long length; above 10 the long one is used."
+        },
+        "data": {
+          "name": "Data",
+          "description": "The fields above as one object, the way they were given before they became fields of their own. A field given on its own wins."
+        }
+      }
+    },
+    "execute_command": {
+      "name": "Run system command",
+      "description": "Runs a system command on the Windows PC (lock, sleep, shutdown and so on), or cancels a pending shutdown or restart.",
+      "fields": {
+        "device_name": {
+          "name": "Device name",
+          "description": "The Windows device, as named in the client."
+        },
+        "command": {
+          "name": "Command",
+          "description": "The command to run. It has to be enabled on the Capabilities page of the Windows client."
+        },
+        "comment": {
+          "name": "Comment",
+          "description": "For shutdown and restart: the text Windows shows to the logged-in user."
+        },
+        "force": {
+          "name": "Force",
+          "description": "For shutdown and restart: do not wait for apps to close."
+        },
+        "time": {
+          "name": "Delay",
+          "description": "For shutdown and restart: seconds before it starts."
+        },
+        "restart_cancel": {
+          "name": "Cancel shutdown or restart",
+          "description": "Cancels a pending shutdown or restart instead of running a command."
+        }
+      }
+    },
+    "set_app_volume": {
+      "name": "Set app volume",
+      "description": "Sets the volume or mute of one app in the Windows volume mixer (client 10.9.0+, Audio sessions sensor enabled).",
+      "fields": {
+        "device_name": {
+          "name": "Device name",
+          "description": "The Windows device, as named in the client."
+        },
+        "app": {
+          "name": "App",
+          "description": "The app as Task Manager names it, without .exe (e.g. spotify)."
+        },
+        "volume": {
+          "name": "Volume",
+          "description": "Volume in percent."
+        },
+        "muted": {
+          "name": "Muted",
+          "description": "Mute or unmute the app."
+        }
+      }
+    }
+  },
+  "selector": {
+    "announcement_priority": {
+      "options": {
+        "normal": "Normal",
+        "important": "Important",
+        "critical": "Critical"
+      }
+    },
+    "notification_style": {
+      "options": {
+        "toast": "Windows notification",
+        "window": "Own window (always visible)"
+      }
+    },
+    "system_command": {
+      "options": {
+        "lock": "Lock",
+        "sleep": "Sleep",
+        "hibernate": "Hibernate",
+        "logoff": "Log off",
+        "monitor_off": "Turn off monitor",
+        "volume_up": "Volume up",
+        "volume_down": "Volume down",
+        "toggle_mute": "Toggle mute",
+        "shutdown": "Shutdown",
+        "restart": "Restart"
+      }
+    }
+  }
+}

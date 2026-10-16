@@ -62,7 +62,7 @@ internal sealed class LocalApiServer : IDisposable
                 MediaPlayer: false,
                 Buttons: false,
                 SystemSensors: false,
-                Update: true,
+                Update: AppIdentity.AutomaticUpdatesEnabled,
                 Commands: []))));
 
         app.MapPost("/notify", async (HttpContext context) =>

@@ -1,0 +1,157 @@
+send_notification:
+  target:
+    entity:
+      domain: notify
+  fields:
+    message:
+      required: true
+      selector:
+        text:
+    title:
+      selector:
+        text:
+    image:
+      example: camera.front_door
+      selector:
+        text:
+    actions:
+      selector:
+        object:
+          multiple: true
+          label_field: title
+          description_field: action
+          fields:
+            action:
+              label: Action
+              required: true
+              selector:
+                text:
+            title:
+              label: Label
+              selector:
+                text:
+    inputs:
+      selector:
+        object:
+          multiple: true
+          label_field: title
+          description_field: id
+          fields:
+            id:
+              label: Id
+              selector:
+                text:
+            title:
+              label: Hint
+              selector:
+                text:
+    style:
+      selector:
+        select:
+          translation_key: notification_style
+          options:
+            - toast
+            - window
+    duration:
+      selector:
+        number:
+          min: 1
+          max: 60
+          unit_of_measurement: s
+          mode: box
+    data:
+      selector:
+        object:
+
+execute_command:
+  fields:
+    device_name:
+      required: true
+      selector:
+        text:
+    command:
+      selector:
+        select:
+          translation_key: system_command
+          options:
+            - lock
+            - sleep
+            - hibernate
+            - logoff
+            - monitor_off
+            - volume_up
+            - volume_down
+            - toggle_mute
+            - shutdown
+            - restart
+    comment:
+      selector:
+        text:
+    force:
+      default: false
+      selector:
+        boolean:
+    time:
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 315360000
+          mode: box
+          unit_of_measurement: s
+    restart_cancel:
+      default: false
+      selector:
+        boolean:
+
+set_app_volume:
+  fields:
+    device_name:
+      required: true
+      selector:
+        text:
+    app:
+      required: true
+      example: spotify
+      selector:
+        text:
+    volume:
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+    muted:
+      selector:
+        boolean:
+
+announce:
+  fields:
+    device_name:
+      required: true
+      example: MY-PC
+      selector:
+        text:
+    message:
+      required: true
+      selector:
+        text:
+          multiline: true
+    priority:
+      default: normal
+      selector:
+        select:
+          translation_key: announcement_priority
+          options:
+            - normal
+            - important
+            - critical
+    tts_entity_id:
+      default: tts.google_translate_en_com
+      selector:
+        entity:
+          domain: tts
+    chime_media_id:
+      example: media-source://media_source/local/sounds/alert.mp3
+      selector:
+        text:

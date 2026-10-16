@@ -1,0 +1,1613 @@
+"""The HASS.Agent integration."""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+from typing import Any
+
+import voluptuous as vol
+from aiohttp import ClientError, ClientTimeout
+from homeassistant.components import mqtt, persistent_notification
+from homeassistant.components.mqtt.models import ReceiveMessage
+from homeassistant.components.mqtt.subscription import (
+    async_prepare_subscribe_topics,
+    async_subscribe_topics,
+    async_unsubscribe_topics,
+)
+from homeassistant.components.notify.const import (
+    ATTR_DATA,
+    ATTR_MESSAGE,
+    ATTR_TITLE,
+)
+from homeassistant.components.notify.const import (
+    DOMAIN as NOTIFY_DOMAIN,
+)
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_URL, Platform
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import service
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.issue_registry import async_delete_issue
+from homeassistant.helpers.start import async_at_started
+from homeassistant.helpers.typing import ConfigType
+from homeassistant.loader import async_get_integration
+
+from . import announcements, ws_commands
+from .const import (
+    CONF_COMMAND,
+    CONF_COMMENT,
+    CONF_DEVICE_NAME,
+    CONF_FORCE,
+    CONF_HA_API,
+    CONF_RESTART_CANCEL,
+    CONF_TIME,
+    DOMAIN,
+    SIGNAL_BUTTONS_UPDATED,
+    SIGNAL_SENSORS_UPDATED,
+    SIGNAL_UPDATE_STATE,
+)
+from .entity import async_get_agent_device, availability_signal
+
+PLATFORMS: list[Platform] = [
+    Platform.MEDIA_PLAYER,
+    Platform.NOTIFY,
+    Platform.EVENT,
+    Platform.SENSOR,
+    Platform.LIGHT,
+    Platform.SELECT,
+    Platform.BUTTON,
+]
+# Loaded and unloaded together: the light and the selects exist for sensor keys.
+SENSOR_PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.LIGHT, Platform.SELECT]
+SERVICE_SEND_NOTIFICATION = "send_notification"
+SERVICE_EXECUTE_COMMAND = "execute_command"
+SERVICE_SET_APP_VOLUME = "set_app_volume"
+CONF_APP = "app"
+CONF_VOLUME = "volume"
+CONF_MUTED = "muted"
+SERVICE_STATUS_STORAGE_KEY = "_service_status"
+# The latest hass_agent_device_update payload per serial number, as it came over the HA API.
+WS_DEVICES_STORAGE_KEY = "_ws_devices"
+
+# HA API (WebSocket) has no broker Last Will, so the device sends a heartbeat
+# every 30s; mark it offline if three in a row are missed.
+WS_AVAILABILITY_TIMEOUT = 90
+BUTTON_COMMANDS_STORAGE_KEY = "button_commands"
+CUSTOM_COMMANDS_STORAGE_KEY = "custom_button_commands"
+CUSTOM_SENSORS_STORAGE_KEY = "custom_sensors"
+STANDARD_SENSORS_STORAGE_KEY = "standard_sensors"
+SYSTEM_COMMANDS = {
+    "lock",
+    "sleep",
+    "hibernate",
+    "logoff",
+    "monitor_off",
+    "volume_up",
+    "volume_down",
+    "toggle_mute",
+    "shutdown",
+    "restart",
+}
+SYSTEM_SERVICE_COMMANDS = {"shutdown", "restart", "restart_cancel"}
+BUTTON_ENTITY_COMMANDS = SYSTEM_COMMANDS | {"restart_cancel"}
+
+_logger = logging.getLogger(__name__)
+
+
+def update_device_info(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    new_device_info: dict[str, Any],
+) -> None:
+    """Update the Home Assistant device registry from HASS.Agent device data."""
+    device_info = new_device_info.get("device")
+    if not isinstance(device_info, dict):
+        _logger.debug("received device update without device info for %s", entry.unique_id)
+        return
+
+    device_name = device_info.get("name")
+    if not isinstance(device_name, str) or not device_name:
+        _logger.debug("received device update without device name for %s", entry.unique_id)
+        return
+
+    device_registry = dr.async_get(hass)
+    device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, entry.unique_id)},
+        name=device_name,
+        manufacturer=device_info.get("manufacturer"),
+        model=device_info.get("model"),
+        sw_version=device_info.get("sw_version"),
+    )
+
+
+@callback
+def _async_request_announce(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Ask a client on the HA API to send its device data, update state and status again.
+
+    The client sends them when it connects, and after a Home Assistant restart it is
+    connected before this integration listens: everything it said is lost, and the HA
+    API keeps nothing for latecomers the way a broker keeps retained messages. A client
+    10.9.0 or newer answers the request; an older one ignores it. Asked when Home
+    Assistant has finished starting, or, for a reload while it runs, a moment after this
+    setup: the answer loads platforms, which must not start while the setup is under way.
+    """
+
+    @callback
+    def _ask(_arg: Any = None) -> None:
+        hass.bus.async_fire(
+            "hass_agent_command",
+            {"serial_number": entry.unique_id, "command_type": "announce"},
+        )
+
+    if hass.is_running:
+        entry.async_on_unload(async_call_later(hass, 2, _ask))
+    else:
+        entry.async_on_unload(async_at_started(hass, _ask))
+
+
+@callback
+def _async_store_device_data(hass: HomeAssistant, entry: ConfigEntry, payload: dict[str, Any]) -> None:
+    """Keep the latest device data of an HA API-only PC in its config entry.
+
+    Over MQTT the retained device message brings the current version and capabilities
+    back after every Home Assistant start. The HA API has nothing like it, and the entry
+    kept what the PC looked like on the day it was added: after a restart the device
+    showed that old version, and lost what it had gained since, until the client
+    happened to announce itself again.
+    """
+    if not entry.data.get(CONF_HA_API, False):
+        return
+
+    device = payload.get("device")
+    apis = payload.get("apis")
+    # The same conditions as update_device_info: what is stored must be usable at set-up.
+    name = device.get("name") if isinstance(device, dict) else None
+    if not isinstance(name, str) or not name or not isinstance(apis, dict):
+        return
+
+    if entry.data.get("device") == device and entry.data.get("apis") == apis:
+        return
+
+    hass.config_entries.async_update_entry(entry, data={**entry.data, "device": device, "apis": apis})
+
+
+async def _async_forward_once(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    platforms: list[Platform],
+    loaded: dict[str, bool],
+    loaded_key: str,
+) -> None:
+    """Set the platforms up and mark them loaded, in that order as seen from outside.
+
+    Two capability messages of one device can arrive back to back (at a Home Assistant
+    start: the retained one and the client's fresh one) and are handled as two tasks. The
+    mark is set before the first await, so the second task finds the platform loaded
+    instead of setting it up again, which Home Assistant refuses with an error.
+    """
+    loaded[loaded_key] = True
+    try:
+        await hass.config_entries.async_forward_entry_setups(entry, platforms)
+    except Exception:
+        loaded[loaded_key] = False
+        raise
+
+
+async def _async_update_platform(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    platform: Platform,
+    loaded_key: str,
+    should_load: bool,
+    device_name: str,
+) -> None:
+    """Load or unload a platform when a HASS.Agent API capability changes."""
+    loaded = hass.data[DOMAIN][entry.entry_id]["loaded"]
+    is_loaded = loaded.get(loaded_key, False)
+
+    if should_load and not is_loaded:
+        _logger.debug("loading %s for device: %s [%s]", platform, device_name, entry.unique_id)
+        await _async_forward_once(hass, entry, [platform], loaded, loaded_key)
+        return
+
+    if not should_load and is_loaded:
+        _logger.debug("unloading %s for device: %s [%s]", platform, device_name, entry.unique_id)
+        unload_ok = await hass.config_entries.async_forward_entry_unload(entry, platform)
+        if unload_ok:
+            loaded[loaded_key] = False
+            _async_remove_platform_entities(hass, entry, platform)
+        else:
+            _logger.warning("failed to unload %s for device: %s [%s]", platform, device_name, entry.unique_id)
+    elif not should_load:
+        _async_remove_platform_entities(hass, entry, platform)
+
+
+def _async_remove_platform_entities(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    platform: Platform,
+) -> None:
+    """Remove all entities for a disabled simple platform from the entity registry."""
+    entity_registry = er.async_get(hass)
+    for entity in list(er.async_entries_for_config_entry(entity_registry, entry.entry_id)):
+        if entity.domain == platform.value:
+            entity_registry.async_remove(entity.entity_id)
+
+
+def _normalize_commands(commands: Any) -> tuple[tuple[str, str, str | None], ...]:
+    """Return a stable command descriptor tuple from a HASS.Agent command list."""
+    if not isinstance(commands, list):
+        return ()
+
+    normalized: dict[str, tuple[str, str | None]] = {}
+    for command in commands:
+        if not isinstance(command, dict) or not isinstance(command.get("name"), str):
+            continue
+
+        display_name = command.get("display_name")
+        if not isinstance(display_name, str) or not display_name.strip():
+            continue
+
+        comment = command.get("comment")
+        normalized[command["name"]] = (
+            display_name.strip(),
+            comment.strip() if isinstance(comment, str) and comment.strip() else None,
+        )
+
+    return tuple(
+        (name, display_name, comment)
+        for name, (display_name, comment) in sorted(normalized.items(), key=lambda item: item[0])
+    )
+
+
+@callback
+def _refresh_availability(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Recompute device availability from both sides and tell the entities.
+
+    The tray app and the Windows service are separate providers. Either one being
+    alive means the device is reachable, so closing the tray app must not take the
+    service's sensors down with it. Entities that know which side feeds them refine
+    this further and grey out on their own.
+    """
+    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if entry_data is None:
+        return
+
+    app_online = bool(entry_data.get("app_online", True))
+    service_online = entry_data.get("service", {}).get("online") is True
+    available = app_online or service_online
+    entry_data["available"] = available
+    async_dispatcher_send(hass, availability_signal(entry.entry_id), available)
+
+
+def _available_button_commands(apis: dict[str, Any], service_status: dict[str, Any]) -> tuple[tuple[str, str, str | None], ...]:
+    """Return commands currently handled by either the tray app or the system service."""
+    commands: dict[str, tuple[str, str | None]] = {}
+
+    if apis.get("buttons") is True:
+        commands.update({command[0]: (command[1], command[2]) for command in _normalize_commands(apis.get("commands"))})
+
+    # Not gated on the service being online: an offline service still says what it
+    # would handle, so its buttons stay in Home Assistant and simply go unavailable.
+    commands.update({command[0]: (command[1], command[2]) for command in _normalize_commands(service_status.get("commands"))})
+
+    return tuple(
+        (name, display_name, comment)
+        for name, (display_name, comment) in sorted(commands.items(), key=lambda item: item[0])
+    )
+
+
+def _normalize_custom_commands(commands: Any) -> tuple[tuple[str, str], ...]:
+    """Return a stable tuple of (id, name) custom command descriptors."""
+    if not isinstance(commands, list):
+        return ()
+
+    normalized: dict[str, str] = {}
+    for command in commands:
+        if not isinstance(command, dict):
+            continue
+
+        command_id = command.get("id")
+        name = command.get("name")
+        if not isinstance(command_id, str) or not command_id:
+            continue
+        if not isinstance(name, str) or not name.strip():
+            continue
+
+        normalized[command_id] = name.strip()
+
+    return tuple(sorted(normalized.items(), key=lambda item: item[0]))
+
+
+def _available_custom_commands(
+    apis: dict[str, Any], service_status: dict[str, Any]
+) -> tuple[tuple[str, str, bool, bool], ...]:
+    """Return custom commands with which transports (tray/service) can run them."""
+    tray = dict(_normalize_custom_commands(apis.get("custom_commands"))) if apis.get("buttons") is True else {}
+    service = dict(_normalize_custom_commands(service_status.get("custom_commands")))
+
+    merged: dict[str, tuple[str, bool, bool]] = {}
+    for command_id in {*tray, *service}:
+        name = tray.get(command_id) or service.get(command_id) or command_id
+        merged[command_id] = (name, command_id in tray, command_id in service)
+
+    return tuple(
+        (command_id, name, in_tray, in_service)
+        for command_id, (name, in_tray, in_service) in sorted(merged.items(), key=lambda item: item[0])
+    )
+
+
+def _normalize_custom_sensors(sensors: Any) -> tuple[tuple[str, str, str, str, str | None, str | None, str | None, str | None], ...]:
+    """Return a stable tuple of custom sensor descriptors."""
+    if not isinstance(sensors, list):
+        return ()
+
+    normalized = []
+    for sensor in sensors:
+        if not isinstance(sensor, dict):
+            continue
+
+        sensor_id = sensor.get("id")
+        sensor_type = sensor.get("type")
+        name = sensor.get("name")
+        parameter = sensor.get("parameter")
+        if not all(isinstance(value, str) and value for value in (sensor_id, sensor_type, name, parameter)):
+            continue
+
+        normalized.append(
+            (
+                sensor_id,
+                sensor_type,
+                name,
+                parameter,
+                sensor.get("unit") if isinstance(sensor.get("unit"), str) else None,
+                sensor.get("device_class") if isinstance(sensor.get("device_class"), str) else None,
+                sensor.get("state_class") if isinstance(sensor.get("state_class"), str) else None,
+                sensor.get("icon") if isinstance(sensor.get("icon"), str) else None,
+            )
+        )
+
+    return tuple(sorted(normalized, key=lambda item: item[0]))
+
+
+def _normalize_standard_sensors(sensors: Any) -> tuple[tuple[str, str], ...]:
+    """Return a stable tuple of standard sensor descriptors."""
+    if not isinstance(sensors, list):
+        return ()
+
+    normalized: dict[str, str] = {}
+    for sensor in sensors:
+        if not isinstance(sensor, dict) or not isinstance(sensor.get("key"), str):
+            continue
+
+        name = sensor.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+
+        normalized[sensor["key"]] = name.strip()
+
+    return tuple(sorted(normalized.items(), key=lambda item: item[0]))
+
+
+def _available_standard_sensors(apis: dict[str, Any], service_status: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    """Return standard sensors currently handled by either app or service."""
+    sensors = (
+        dict(_normalize_standard_sensors(apis.get("standard_sensors")))
+        if apis.get("system_sensors") is True
+        else {}
+    )
+
+    if service_status.get("system_sensors") is True:
+        sensors.update(dict(_normalize_standard_sensors(service_status.get("standard_sensors"))))
+
+    return tuple(sorted(sensors.items(), key=lambda item: item[0]))
+
+
+def _available_custom_sensors(apis: dict[str, Any], service_status: dict[str, Any]) -> tuple[tuple[str, str, str, str, str | None, str | None, str | None, str | None], ...]:
+    """Return custom sensors currently handled by either app or service."""
+    sensors: dict[str, tuple[str, str, str, str, str | None, str | None, str | None, str | None]] = {}
+
+    if apis.get("system_sensors") is True:
+        for sensor in _normalize_custom_sensors(apis.get("custom_sensors")):
+            sensors[sensor[0]] = sensor
+
+    if service_status.get("system_sensors") is True:
+        for sensor in _normalize_custom_sensors(service_status.get("custom_sensors")):
+            sensors[sensor[0]] = sensor
+
+    return tuple(sorted(sensors.values(), key=lambda item: item[0]))
+
+
+def _button_update_signal(entry_id: str) -> str:
+    """Return the dispatcher signal for button state updates."""
+    return SIGNAL_BUTTONS_UPDATED.format(entry_id)
+
+
+def _button_unique_id(entry: ConfigEntry, command: str) -> str:
+    """Return the unique ID used by the command button entity."""
+    return f"button_{entry.unique_id}_{command}"
+
+
+def _sensor_unique_id(entry: ConfigEntry, sensor_id: str) -> str:
+    """Return the unique ID used by a custom sensor entity."""
+    return f"sensor_{entry.unique_id}_custom_{sensor_id}"
+
+
+def _standard_sensor_unique_id(entry: ConfigEntry, sensor_key: str) -> str:
+    """Return the unique ID used by a standard sensor entity."""
+    return f"sensor_{entry.unique_id}_{sensor_key}"
+
+
+def _custom_command_unique_id(entry: ConfigEntry, command_id: str) -> str:
+    """Return the unique ID used by a custom command button entity."""
+    return f"button_{entry.unique_id}_customcmd_{command_id}"
+
+
+def _async_remove_inactive_button_entities(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    active_commands: set[str],
+    active_custom_ids: set[str],
+) -> None:
+    """Remove disabled command button entities from the entity registry."""
+    entity_registry = er.async_get(hass)
+
+    for command in BUTTON_ENTITY_COMMANDS - active_commands:
+        entity_id = entity_registry.async_get_entity_id(
+            Platform.BUTTON.value,
+            DOMAIN,
+            _button_unique_id(entry, command),
+        )
+        if entity_id is not None:
+            entity_registry.async_remove(entity_id)
+
+    custom_prefix = f"button_{entry.unique_id}_customcmd_"
+    for entity in list(er.async_entries_for_config_entry(entity_registry, entry.entry_id)):
+        if entity.domain != Platform.BUTTON.value or not entity.unique_id.startswith(custom_prefix):
+            continue
+        command_id = entity.unique_id.removeprefix(custom_prefix)
+        if command_id not in active_custom_ids:
+            entity_registry.async_remove(entity.entity_id)
+
+
+def _async_remove_inactive_custom_sensor_entities(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    active_sensor_ids: set[str],
+) -> None:
+    """Remove disabled custom sensor entities from the entity registry."""
+    entity_registry = er.async_get(hass)
+
+    for entity in list(er.async_entries_for_config_entry(entity_registry, entry.entry_id)):
+        if entity.domain != Platform.SENSOR.value or not entity.unique_id.startswith(f"sensor_{entry.unique_id}_custom_"):
+            continue
+
+        sensor_id = entity.unique_id.removeprefix(f"sensor_{entry.unique_id}_custom_")
+        if sensor_id not in active_sensor_ids:
+            entity_registry.async_remove(entity.entity_id)
+
+
+def _async_remove_inactive_standard_sensor_entities(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    active_sensor_keys: set[str],
+) -> None:
+    """Remove disabled standard sensor entities from the entity registry."""
+    entity_registry = er.async_get(hass)
+
+    for entity in list(er.async_entries_for_config_entry(entity_registry, entry.entry_id)):
+        if entity.domain == Platform.SELECT.value:
+            # An audio select exists while the agent advertises the sensor it belongs to.
+            for sensor_key, select_key in (
+                ("audio_output_device", "audio_output"),
+                ("audio_input_device", "audio_input"),
+            ):
+                if (
+                    entity.unique_id == f"select_{entry.unique_id}_{select_key}"
+                    and sensor_key not in active_sensor_keys
+                ):
+                    entity_registry.async_remove(entity.entity_id)
+            continue
+        if entity.domain == Platform.LIGHT.value:
+            # The display light exists while the agent advertises its brightness.
+            if (
+                entity.unique_id == f"light_{entry.unique_id}_display"
+                and "display_brightness" not in active_sensor_keys
+            ):
+                entity_registry.async_remove(entity.entity_id)
+            continue
+        if entity.domain != Platform.SENSOR.value:
+            continue
+        if entity.unique_id.startswith(f"sensor_{entry.unique_id}_custom_"):
+            continue
+        if not entity.unique_id.startswith(f"sensor_{entry.unique_id}_"):
+            continue
+
+        sensor_key = entity.unique_id.removeprefix(f"sensor_{entry.unique_id}_")
+        if sensor_key not in active_sensor_keys:
+            entity_registry.async_remove(entity.entity_id)
+
+
+async def _async_update_button_platform(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    should_load: bool,
+    device_name: str,
+    command_signature: tuple[tuple[str, str, str | None], ...],
+    custom_command_signature: tuple[tuple[str, str, bool, bool], ...],
+) -> None:
+    """Load, unload, or reload button entities when the command list changes."""
+    entry_data = hass.data[DOMAIN][entry.entry_id]
+    loaded = entry_data["loaded"]
+    is_loaded = loaded.get("button", False)
+    previous_signature = tuple(entry_data.get(BUTTON_COMMANDS_STORAGE_KEY, ()))
+    previous_custom_signature = tuple(entry_data.get(CUSTOM_COMMANDS_STORAGE_KEY, ()))
+    active_commands = {command[0] for command in command_signature}
+    active_custom_ids = {command[0] for command in custom_command_signature}
+
+    if (
+        should_load
+        and is_loaded
+        and previous_signature == command_signature
+        and previous_custom_signature == custom_command_signature
+    ):
+        _async_remove_inactive_button_entities(hass, entry, active_commands, active_custom_ids)
+        return
+
+    if is_loaded:
+        _logger.debug("unloading button for device: %s [%s]", device_name, entry.unique_id)
+        unload_ok = await hass.config_entries.async_forward_entry_unload(entry, Platform.BUTTON)
+        if not unload_ok:
+            _logger.warning("failed to unload button for device: %s [%s]", device_name, entry.unique_id)
+            return
+
+        loaded["button"] = False
+        await hass.async_block_till_done()
+
+    _async_remove_inactive_button_entities(hass, entry, active_commands, active_custom_ids)
+    entry_data[BUTTON_COMMANDS_STORAGE_KEY] = command_signature
+    entry_data[CUSTOM_COMMANDS_STORAGE_KEY] = custom_command_signature
+
+    if should_load:
+        _logger.debug(
+            "loading button for device: %s [%s] commands=%s custom=%s",
+            device_name,
+            entry.unique_id,
+            command_signature,
+            custom_command_signature,
+        )
+        await _async_forward_once(hass, entry, [Platform.BUTTON], loaded, "button")
+
+
+async def _async_update_sensor_platform(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    should_load: bool,
+    device_name: str,
+    custom_sensors: tuple[tuple[str, str, str, str, str | None, str | None, str | None, str | None], ...],
+    standard_sensors: tuple[tuple[str, str], ...],
+) -> None:
+    """Load, unload, or reload sensor entities when custom sensors change."""
+    entry_data = hass.data[DOMAIN][entry.entry_id]
+    loaded = entry_data["loaded"]
+    is_loaded = loaded.get("sensor", False)
+    previous_custom_signature = tuple(entry_data.get(CUSTOM_SENSORS_STORAGE_KEY, ()))
+    previous_standard_signature = tuple(entry_data.get(STANDARD_SENSORS_STORAGE_KEY, ()))
+    active_sensor_ids = {sensor[0] for sensor in custom_sensors}
+    active_standard_keys = {sensor[0] for sensor in standard_sensors}
+
+    if should_load and is_loaded and previous_custom_signature == custom_sensors and previous_standard_signature == standard_sensors:
+        _async_remove_inactive_custom_sensor_entities(hass, entry, active_sensor_ids)
+        _async_remove_inactive_standard_sensor_entities(hass, entry, active_standard_keys)
+        async_dispatcher_send(hass, SIGNAL_SENSORS_UPDATED.format(entry.entry_id))
+        return
+
+    if is_loaded:
+        _logger.debug("unloading sensor for device: %s [%s]", device_name, entry.unique_id)
+        # The display light and the audio selects are built from sensor keys, so they
+        # live and die with the sensors.
+        unload_ok = await hass.config_entries.async_unload_platforms(entry, SENSOR_PLATFORMS)
+        if not unload_ok:
+            _logger.warning("failed to unload sensor for device: %s [%s]", device_name, entry.unique_id)
+            return
+
+        loaded["sensor"] = False
+        await hass.async_block_till_done()
+
+    _async_remove_inactive_custom_sensor_entities(hass, entry, active_sensor_ids)
+    _async_remove_inactive_standard_sensor_entities(hass, entry, active_standard_keys)
+    entry_data[CUSTOM_SENSORS_STORAGE_KEY] = custom_sensors
+    entry_data[STANDARD_SENSORS_STORAGE_KEY] = standard_sensors
+
+    if should_load:
+        _logger.debug("loading sensor for device: %s [%s]", device_name, entry.unique_id)
+        await _async_forward_once(hass, entry, list(SENSOR_PLATFORMS), loaded, "sensor")
+
+
+async def handle_apis_changed(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    apis: dict[str, Any] | None,
+) -> None:
+    """Bring the platforms of a device in line with its capabilities, one change at a time.
+
+    Capability messages come in bursts (at a Home Assistant start: the retained MQTT
+    message, the service's status, the client's answer to the announce request), each
+    handled as a task of its own. Loading and unloading platforms awaits in between, and
+    two of these interleaving set a platform up twice or unloaded it mid-setup. While one
+    is at work, a later one only leaves its capabilities behind and returns; the one at
+    work applies them when it is done, the latest winning.
+    """
+    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if entry_data is None:
+        return
+
+    if entry_data.get("apis_busy"):
+        entry_data["apis_pending"] = (apis,)
+        return
+
+    entry_data["apis_busy"] = True
+    try:
+        while True:
+            try:
+                await _async_apply_apis(hass, entry, apis)
+            except Exception:
+                # A newer set of capabilities is waiting: that is the one that counts.
+                if "apis_pending" not in entry_data:
+                    raise
+                _logger.exception("failed to apply capabilities for %s, applying the newer ones", entry.unique_id)
+            pending = entry_data.pop("apis_pending", None)
+            if pending is None:
+                break
+            (apis,) = pending
+    finally:
+        # Also on the way out with an error or a cancellation: nothing stale stays behind
+        # to be applied after some later, newer change.
+        entry_data["apis_busy"] = False
+        entry_data.pop("apis_pending", None)
+
+
+async def _async_apply_apis(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    apis: dict[str, Any] | None,
+) -> None:
+    _logger.debug("api changed for: %s", entry.unique_id)
+    if apis is not None:
+        if not isinstance(apis, dict):
+            _logger.warning("received invalid API capabilities for %s", entry.unique_id)
+            return
+
+        device = async_get_agent_device(hass, entry)
+        device_name = device.name if device is not None else entry.title
+
+        media_player = apis.get("media_player", False)
+        notifications = apis.get("notifications", False)
+        notification_events = notifications and entry.data.get(CONF_URL) is None
+        # The event platform also carries the hotkeys (client 10.9.0+).
+        hotkeys = apis.get("hotkeys")
+        has_hotkeys = isinstance(hotkeys, list) and len(hotkeys) > 0
+        hotkey_signature = tuple(sorted(
+            str(hotkey.get("name"))
+            for hotkey in (hotkeys if has_hotkeys else [])
+            if isinstance(hotkey, dict) and hotkey.get("name")
+        ))
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        if apis.get("update") is False:
+            entry_data.pop("update_state", None)
+            await _async_update_platform(hass, entry, Platform.UPDATE, "update", False, device_name)
+        service_status = entry_data.get("service", {})
+        if not isinstance(service_status, dict):
+            service_status = {}
+        # Whether the sensor platform is loaded at all: again independent of who is
+        # currently running, so a stopped provider greys its sensors out rather than
+        # tearing the platform down.
+        system_sensors = (
+            apis.get("system_sensors", False)
+            or service_status.get("system_sensors") is True
+        ) and entry.data.get(CONF_URL) is None
+        custom_sensors = _available_custom_sensors(apis, service_status)
+        standard_sensors = _available_standard_sensors(apis, service_status)
+        button_commands = _available_button_commands(apis, service_status)
+        custom_commands = _available_custom_commands(apis, service_status)
+        buttons = bool(button_commands or custom_commands) and entry.data.get(CONF_URL) is None
+
+        await _async_update_platform(
+            hass,
+            entry,
+            Platform.MEDIA_PLAYER,
+            "media_player",
+            bool(media_player),
+            device_name,
+        )
+        await _async_update_platform(
+            hass,
+            entry,
+            Platform.NOTIFY,
+            "notifications",
+            bool(notifications),
+            device_name,
+        )
+        # The event entities are built at setup: when the list of hotkeys changes while
+        # the platform is loaded, it is reloaded so the entity and its event types follow.
+        loaded = hass.data[DOMAIN][entry.entry_id]["loaded"]
+        hotkeys_changed = entry_data.get("hotkey_signature") != hotkey_signature
+        # Unloaded only, not removed from the registry: the entities come straight back.
+        if (
+            loaded.get("event", False)
+            and hotkeys_changed
+            and await hass.config_entries.async_forward_entry_unload(entry, Platform.EVENT)
+        ):
+            loaded["event"] = False
+        entry_data["hotkey_signature"] = hotkey_signature
+        await _async_update_platform(
+            hass,
+            entry,
+            Platform.EVENT,
+            "event",
+            bool(notification_events) or has_hotkeys,
+            device_name,
+        )
+        await _async_update_sensor_platform(
+            hass,
+            entry,
+            bool(system_sensors),
+            device_name,
+            custom_sensors,
+            standard_sensors,
+        )
+        await _async_update_button_platform(
+            hass,
+            entry,
+            bool(buttons),
+            device_name,
+            button_commands,
+            custom_commands,
+        )
+        async_dispatcher_send(hass, _button_update_signal(entry.entry_id))
+
+
+@callback
+def _create_device_notification(hass: HomeAssistant, entry: ConfigEntry, title: Any, message: Any) -> None:
+    """Create a persistent notification on behalf of the device (e.g. update progress)."""
+    if not message:
+        return
+    persistent_notification.async_create(
+        hass,
+        str(message),
+        title=str(title) if title else entry.title,
+        notification_id=f"{DOMAIN}_{entry.unique_id}",
+    )
+
+
+@callback
+def _apply_update_state(hass: HomeAssistant, entry: ConfigEntry, state: dict) -> None:
+    """Store the agent's update state and create or refresh the update entity."""
+    entry_data = hass.data[DOMAIN][entry.entry_id]
+    apis = entry_data.get("apis")
+    if isinstance(apis, dict) and apis.get("update") is False:
+        return
+    entry_data["update_state"] = state
+
+    if not entry_data["loaded"].get("update", False):
+        hass.async_create_background_task(
+            _async_update_platform(hass, entry, Platform.UPDATE, "update", True, entry.title),
+            "hass.agent-update-platform",
+        )
+    else:
+        async_dispatcher_send(hass, SIGNAL_UPDATE_STATE.format(entry.entry_id))
+
+
+def _discovered_update_entity_id(hass: HomeAssistant, entry: ConfigEntry) -> str | None:
+    """The update entity Home Assistant's MQTT discovery built from an older agent, if any.
+
+    Agents before 10.7.3 publish a discovery config for the update entity and do
+    not know to stop; while that entity exists, the integration must not add a
+    second one. The agent sanitizes the serial number the same way for the id.
+    """
+    sanitized = re.sub(r"[^a-z0-9]", "_", entry.unique_id.strip().lower()) or "hass_agent_net10"
+    return er.async_get(hass).async_get_entity_id("update", "mqtt", f"{sanitized}_hass_agent_net10_update")
+
+
+@callback
+def _apply_update_state_when_free(hass: HomeAssistant, entry: ConfigEntry, state: dict, attempt: int = 0) -> None:
+    """Apply an update state from MQTT unless an older agent's discovered entity is in the way.
+
+    A second entity next to the discovered one would only confuse. An agent 10.7.3+
+    clears its discovery config right before it publishes the state, and Home
+    Assistant removes the discovered entity a moment later, so a few short retries
+    let the integration's entity take over on the same connect.
+    """
+    discovered = _discovered_update_entity_id(hass, entry)
+    if discovered is None:
+        _apply_update_state(hass, entry, state)
+        return
+
+    if attempt >= 6:
+        _logger.debug("update entity %s comes from MQTT discovery (older agent), not adding another", discovered)
+        return
+
+    @callback
+    def _retry(_now) -> None:
+        _apply_update_state_when_free(hass, entry, state, attempt + 1)
+
+    async_call_later(hass, 5, _retry)
+
+
+async def _async_publish_integration_info(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Tell the agent what this integration takes care of (retained, per device).
+
+    An agent 10.7.3 or newer reads it right after connecting and leaves the update
+    entity to the integration on MQTT as well; older agents ignore the topic.
+    """
+    integration = await async_get_integration(hass, DOMAIN)
+    await mqtt.async_publish(
+        hass,
+        f"hass.agent/integration/{entry.unique_id}",
+        json.dumps({"version": integration.version, "update_entity": True}),
+        qos=0,
+        retain=True,
+    )
+
+
+def _register_ws_listeners(hass: HomeAssistant, entry: ConfigEntry) -> list:
+    """Register WebSocket event listeners for HA API failover/standalone transport."""
+
+    @callback
+    def _ws_device_update(event) -> None:
+        data = event.data
+        if data.get("serial_number") != entry.unique_id:
+            return
+        apis = data.get("apis")
+        if not isinstance(apis, dict):
+            return
+        update_device_info(hass, entry, data)
+        _async_store_device_data(hass, entry, data)
+        hass.data[DOMAIN][entry.entry_id]["apis"] = apis
+        hass.async_create_background_task(
+            handle_apis_changed(hass, entry, apis), "hass.agent-ws-device"
+        )
+
+    @callback
+    def _ws_service_update(event) -> None:
+        """The system service announcing itself over the HA API transport.
+
+        The WebSocket has no per-role topics, so the service publishes its status as
+        its own event. Stored exactly like the MQTT service topic, so the existing
+        merge of app and service capabilities works the same on both transports.
+        """
+        data = event.data
+        if data.get("serial_number") != entry.unique_id:
+            return
+        status = data.get("status")
+        if not isinstance(status, dict):
+            return
+
+        entry_data = hass.data[DOMAIN][entry.entry_id]
+        entry_data["service"] = status
+        hass.data[DOMAIN].setdefault(SERVICE_STATUS_STORAGE_KEY, {})[entry.title] = status
+        # The service going up or down changes whether the device is reachable at all.
+        _refresh_availability(hass, entry)
+        hass.async_create_background_task(
+            handle_apis_changed(hass, entry, entry_data.get("apis", {})),
+            "hass.agent-ws-service",
+        )
+
+    @callback
+    def _ws_update_state(event) -> None:
+        """The agent's update state, on the HA API transport."""
+        data = event.data
+        if data.get("serial_number") != entry.unique_id:
+            return
+        state = data.get("state")
+        if not isinstance(state, dict):
+            return
+
+        _apply_update_state(hass, entry, state)
+
+    @callback
+    def _ws_sensor_update(event) -> None:
+        data = event.data
+        if data.get("serial_number") != entry.unique_id:
+            return
+        sensors = data.get("sensors")
+        if sensors is not None:
+            async_dispatcher_send(
+                hass,
+                f"hass_agent_sensor_data_{entry.entry_id}",
+                sensors,
+            )
+
+    @callback
+    def _ws_media_update(event) -> None:
+        data = event.data
+        if data.get("serial_number") != entry.unique_id:
+            return
+        state = data.get("state")
+        if state is not None:
+            async_dispatcher_send(
+                hass,
+                f"hass_agent_media_state_{entry.entry_id}",
+                state,
+            )
+
+    @callback
+    def _ws_media_thumbnail(event) -> None:
+        data = event.data
+        if data.get("serial_number") != entry.unique_id:
+            return
+        thumbnail_b64 = data.get("thumbnail")
+        hass.data[DOMAIN][entry.entry_id]["thumbnail"] = thumbnail_b64
+        async_dispatcher_send(
+            hass,
+            f"hass_agent_media_thumbnail_{entry.entry_id}",
+            thumbnail_b64,
+        )
+
+    @callback
+    def _ws_notification_action(event) -> None:
+        data = event.data
+        if data.get("serial_number") != entry.unique_id:
+            return
+        action = data.get("action")
+        if action:
+            async_dispatcher_send(
+                hass,
+                f"hass_agent_notification_action_{entry.entry_id}",
+                data,
+            )
+
+    @callback
+    def _ws_hotkey(event) -> None:
+        data = event.data
+        if data.get("serial_number") != entry.unique_id:
+            return
+        if data.get("hotkey"):
+            async_dispatcher_send(hass, f"hass_agent_hotkey_{entry.entry_id}", data)
+
+    @callback
+    def _ws_persistent_notification(event) -> None:
+        data = event.data
+        if data.get("serial_number") != entry.unique_id:
+            return
+        _create_device_notification(hass, entry, data.get("title"), data.get("message"))
+
+    @callback
+    def _ws_availability(event) -> None:
+        data = event.data
+        if data.get("serial_number") != entry.unique_id:
+            return
+        online = bool(data.get("online"))
+        entry_data = hass.data[DOMAIN].get(entry.entry_id)
+        if entry_data is None:
+            return
+
+        # Cancel any pending offline timeout; each heartbeat reschedules it.
+        cancel = entry_data.get("availability_timeout")
+        if cancel is not None:
+            cancel()
+            entry_data["availability_timeout"] = None
+
+        # The heartbeat only reports the tray app; the service has its own channel.
+        if not online:
+            entry_data["app_online"] = False
+            _refresh_availability(hass, entry)
+            return
+
+        entry_data["app_online"] = True
+        _refresh_availability(hass, entry)
+
+        @callback
+        def _mark_offline(_now) -> None:
+            entry_data["availability_timeout"] = None
+            if not entry_data.get("app_online", True):
+                return
+            entry_data["app_online"] = False
+            _refresh_availability(hass, entry)
+
+        # No broker Last Will on the WebSocket transport: if heartbeats stop, go offline.
+        entry_data["availability_timeout"] = async_call_later(
+            hass, WS_AVAILABILITY_TIMEOUT, _mark_offline
+        )
+
+    return [
+        hass.bus.async_listen("hass_agent_device_update", _ws_device_update),
+        hass.bus.async_listen("hass_agent_service_update", _ws_service_update),
+        hass.bus.async_listen("hass_agent_update_state", _ws_update_state),
+        hass.bus.async_listen("hass_agent_sensor_update", _ws_sensor_update),
+        hass.bus.async_listen("hass_agent_media_update", _ws_media_update),
+        hass.bus.async_listen("hass_agent_media_thumbnail", _ws_media_thumbnail),
+        hass.bus.async_listen("hass_agent_notification_action", _ws_notification_action),
+        hass.bus.async_listen("hass_agent_hotkey", _ws_hotkey),
+        hass.bus.async_listen("hass_agent_persistent_notification", _ws_persistent_notification),
+        hass.bus.async_listen("hass_agent_availability", _ws_availability),
+    ]
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up HASS.Agent from a config entry."""
+
+    _logger.debug("setting up device from config entry: %s [%s]", entry.title, entry.unique_id)
+
+    hass.data.setdefault(DOMAIN, {})
+
+    hass.data[DOMAIN].setdefault(
+        entry.entry_id,
+        {
+            "internal_mqtt": {},
+            "apis": {},
+            "service": {},
+            "app_online": True,
+            "mqtt_availability_known": False,
+            "available": True,
+            "availability_timeout": None,
+            BUTTON_COMMANDS_STORAGE_KEY: (),
+            CUSTOM_SENSORS_STORAGE_KEY: (),
+            STANDARD_SENSORS_STORAGE_KEY: (),
+            "thumbnail": None,
+            "loaded": {
+                "media_player": False,
+                "notifications": False,
+                "event": False,
+                "sensor": False,
+                "button": False,
+                "update": False,
+            },
+        },
+    )
+
+    url = entry.data.get(CONF_URL, None)
+    is_ha_api = entry.data.get(CONF_HA_API, False)
+
+    # Store the transport mode so entity platforms can check it.
+    hass.data[DOMAIN][entry.entry_id]["ha_api_only"] = bool(is_ha_api)
+
+    if url is not None:
+        # --- Local HTTP API path ---
+        session = async_get_clientsession(hass)
+        try:
+            async with session.get(
+                f"{url}/info", timeout=ClientTimeout(total=60)
+            ) as response:
+                response.raise_for_status()
+                response_json = await response.json()
+        except (ClientError, TimeoutError) as ex:
+            raise ConfigEntryNotReady(f"Failed to connect to HASS.Agent at {url}") from ex
+
+        if not isinstance(response_json, dict):
+            raise ConfigEntryNotReady(f"Received invalid HASS.Agent info response from {url}")
+
+        # Another PC (or anything else) may have the address by now: the notifications and
+        # the API key go only to the PC this entry was set up for.
+        if response_json.get("serial_number") != entry.unique_id:
+            raise ConfigEntryNotReady(
+                f"Another device answers at {url}, not the HASS.Agent this entry was set up for"
+            )
+
+        update_device_info(hass, entry, response_json)
+
+        apis = {
+            "notifications": True,
+            "media_player": False,  # unsupported for the moment
+            "buttons": False,
+            "system_sensors": False,
+        }
+
+        await handle_apis_changed(hass, entry, apis)
+        hass.data[DOMAIN][entry.entry_id]["apis"] = apis
+
+    elif is_ha_api:
+        # --- HA API standalone path ---
+        # Device was discovered via WebSocket event, no MQTT broker needed. There is no
+        # retained message to start from on this transport: the entry keeps the last
+        # device data it saw, and a device update that arrived before this setup wins.
+        latest = hass.data[DOMAIN].get(WS_DEVICES_STORAGE_KEY, {}).get(entry.unique_id)
+        if isinstance(latest, dict):
+            _async_store_device_data(hass, entry, latest)
+
+        update_device_info(hass, entry, entry.data)
+
+        apis = entry.data.get("apis", {})
+        hass.data[DOMAIN][entry.entry_id]["apis"] = apis
+
+        ws_unsubs = _register_ws_listeners(hass, entry)
+        hass.data[DOMAIN][entry.entry_id]["ws_unsubs"] = ws_unsubs
+        _async_request_announce(hass, entry)
+
+        await handle_apis_changed(hass, entry, apis)
+
+    else:
+        # --- MQTT path (with WebSocket failover listeners) ---
+        device_name = entry.data["device"]["name"]
+        topic_id = entry.unique_id
+
+        sub_state = hass.data[DOMAIN][entry.entry_id]["internal_mqtt"]
+
+        @callback
+        def updated(message: ReceiveMessage) -> None:
+            if not message.payload:
+                _logger.debug("received empty update message on '%s', ignoring", message.topic)
+                return
+
+            try:
+                payload = json.loads(message.payload)
+            except ValueError:
+                _logger.warning("received invalid JSON update on '%s'", message.topic)
+                return
+
+            if not isinstance(payload, dict):
+                _logger.warning("received non-object update on '%s'", message.topic)
+                return
+
+            cached = hass.data[DOMAIN][entry.entry_id]["apis"]
+            apis = payload.get("apis")
+            if not isinstance(apis, dict):
+                _logger.warning("received update without API capabilities on '%s'", message.topic)
+                return
+
+            update_device_info(hass, entry, payload)
+
+            hass.data[DOMAIN][entry.entry_id]["apis"] = apis
+            if cached != apis:
+                hass.async_create_background_task(handle_apis_changed(hass, entry, apis), "hass.agent-mqtt")
+            else:
+                hass.async_create_background_task(handle_apis_changed(hass, entry, apis), "hass.agent-mqtt-refresh")
+
+        @callback
+        def service_updated(message: ReceiveMessage) -> None:
+            if not message.payload:
+                _logger.debug("received empty service update on '%s', ignoring", message.topic)
+                return
+
+            try:
+                payload = json.loads(message.payload)
+            except ValueError:
+                _logger.warning("received invalid service JSON on '%s'", message.topic)
+                return
+
+            if not isinstance(payload, dict):
+                _logger.warning("received non-object service update on '%s'", message.topic)
+                return
+
+            entry_data = hass.data[DOMAIN][entry.entry_id]
+            previous_online = bool(entry_data.get("service", {}).get("online"))
+            previous_commands = _normalize_commands(entry_data.get("service", {}).get("commands"))
+            previous_system_sensors = bool(entry_data.get("service", {}).get("system_sensors"))
+            previous_custom_sensors = _normalize_custom_sensors(entry_data.get("service", {}).get("custom_sensors"))
+            previous_standard_sensors = _normalize_standard_sensors(entry_data.get("service", {}).get("standard_sensors"))
+            previous_custom_commands = _normalize_custom_commands(entry_data.get("service", {}).get("custom_commands"))
+            entry_data["service"] = payload
+            hass.data[DOMAIN].setdefault(SERVICE_STATUS_STORAGE_KEY, {})[device_name] = payload
+            # The service going up or down changes whether the device is reachable at all.
+            _refresh_availability(hass, entry)
+
+            online = payload.get("online") is True
+            commands = _normalize_commands(payload.get("commands"))
+            system_sensors = payload.get("system_sensors") is True
+            custom_sensors = _normalize_custom_sensors(payload.get("custom_sensors"))
+            standard_sensors = _normalize_standard_sensors(payload.get("standard_sensors"))
+            custom_commands = _normalize_custom_commands(payload.get("custom_commands"))
+            if (
+                previous_online != online
+                or previous_commands != commands
+                or previous_system_sensors != system_sensors
+                or previous_custom_sensors != custom_sensors
+                or previous_standard_sensors != standard_sensors
+                or previous_custom_commands != custom_commands
+            ):
+                cached_apis = entry_data.get("apis", {})
+                hass.async_create_background_task(
+                    handle_apis_changed(hass, entry, cached_apis),
+                    "hass.agent-service",
+                )
+
+        @callback
+        def device_notification(message: ReceiveMessage) -> None:
+            if not message.payload:
+                return
+
+            try:
+                payload = json.loads(message.payload)
+            except ValueError:
+                _logger.warning("received invalid notification JSON on '%s'", message.topic)
+                return
+
+            if not isinstance(payload, dict):
+                return
+
+            _create_device_notification(hass, entry, payload.get("title"), payload.get("message"))
+
+        @callback
+        def update_state_updated(message: ReceiveMessage) -> None:
+            """The agent's update state (retained), the same one its discovered entity reads."""
+            if not message.payload:
+                return
+
+            try:
+                state = json.loads(message.payload)
+            except ValueError:
+                _logger.warning("received invalid update state JSON on '%s'", message.topic)
+                return
+
+            if not isinstance(state, dict):
+                return
+
+            _apply_update_state_when_free(hass, entry, state)
+
+        @callback
+        def availability_updated(message: ReceiveMessage) -> None:
+            # This topic is published by the tray app only, so it says nothing about
+            # the service — hence app_online rather than the device's availability.
+            online = str(message.payload).strip().lower() == "online"
+            entry_data = hass.data[DOMAIN].get(entry.entry_id)
+            if entry_data is None:
+                return
+            entry_data["mqtt_availability_known"] = True
+            entry_data["app_online"] = online
+            _refresh_availability(hass, entry)
+
+        sub_state = async_prepare_subscribe_topics(
+            hass,
+            sub_state,
+            {
+                f"{entry.unique_id}-apis": {
+                    "topic": f"hass.agent/devices/{topic_id}",
+                    "msg_callback": updated,
+                    "qos": 0,
+                },
+                f"{entry.unique_id}-service": {
+                    "topic": f"hass.agent/system/{topic_id}/state",
+                    "msg_callback": service_updated,
+                    "qos": 0,
+                },
+                f"{entry.unique_id}-persistent-notification": {
+                    "topic": f"hass.agent/persistent_notification/{topic_id}",
+                    "msg_callback": device_notification,
+                    "qos": 0,
+                },
+                f"{entry.unique_id}-availability": {
+                    "topic": f"hass.agent/devices/{topic_id}/availability",
+                    "msg_callback": availability_updated,
+                    "qos": 1,
+                },
+                f"{entry.unique_id}-update": {
+                    "topic": f"hass.agent/update/{topic_id}/state",
+                    "msg_callback": update_state_updated,
+                    "qos": 0,
+                },
+            },
+        )
+        sub_state = announcements.async_prepare_state_subscription(hass, entry, sub_state)
+
+        await async_subscribe_topics(hass, sub_state)
+        await _async_publish_integration_info(hass, entry)
+
+        hass.data[DOMAIN][entry.entry_id]["internal_mqtt"] = sub_state
+
+        # WebSocket failover event listeners (alongside MQTT subscriptions).
+        ws_unsubs = _register_ws_listeners(hass, entry)
+        hass.data[DOMAIN][entry.entry_id]["ws_unsubs"] = ws_unsubs
+        _async_request_announce(hass, entry)
+
+    # Clean up stale restart_required repair issues for this device.
+    # These are created on device rename and resolved by any HA restart,
+    # but the repair flow may not persist the resolution before shutdown.
+    async_delete_issue(hass, DOMAIN, f"restart_required_{entry.title}")
+
+    return True
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Clear the retained announcement of a device that is being deleted."""
+    if entry.data.get(CONF_URL) is None and not entry.data.get(CONF_HA_API, False):
+        try:
+            await mqtt.async_publish(hass, f"hass.agent/integration/{entry.unique_id}", "", qos=0, retain=True)
+        except HomeAssistantError:
+            # No broker right now: a stale retained message is harmless, the agent
+            # only reads it while the device is set up here.
+            pass
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload a config entry."""
+
+    _logger.debug("unloading device: %s [%s]", entry.title, entry.unique_id)
+
+    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if entry_data is None:
+        _logger.debug("config entry (%s) has no runtime data to unload", entry.unique_id)
+        return True
+
+    # Cancel any pending HA API availability timeout.
+    cancel_availability = entry_data.get("availability_timeout")
+    if cancel_availability is not None:
+        cancel_availability()
+        entry_data["availability_timeout"] = None
+
+    loaded = entry_data.get("loaded", None)
+
+    if loaded is not None:
+        platforms_to_unload = []
+
+        if loaded.get("media_player", False):
+            platforms_to_unload.append(Platform.MEDIA_PLAYER)
+
+        if loaded.get("notifications", False):
+            platforms_to_unload.append(Platform.NOTIFY)
+
+        if loaded.get("event", False):
+            platforms_to_unload.append(Platform.EVENT)
+
+        if loaded.get("sensor", False):
+            platforms_to_unload.extend(SENSOR_PLATFORMS)
+
+        if loaded.get("button", False):
+            platforms_to_unload.append(Platform.BUTTON)
+
+        if loaded.get("update", False):
+            platforms_to_unload.append(Platform.UPDATE)
+
+        if platforms_to_unload:
+            unload_ok = await hass.config_entries.async_unload_platforms(entry, platforms_to_unload)
+            if unload_ok:
+                _logger.debug("unloaded platforms %s for: %s [%s]", platforms_to_unload, entry.title, entry.unique_id)
+            else:
+                _logger.warning("failed to unload platforms %s for: %s [%s]", platforms_to_unload, entry.title, entry.unique_id)
+                return False
+    else:
+        _logger.warning("config entry (%s) has no apis loaded?", entry.unique_id)
+
+    url = entry.data.get(CONF_URL, None)
+    is_ha_api = entry.data.get(CONF_HA_API, False)
+
+    if url is None:
+        if not is_ha_api:
+            # MQTT path — unsubscribe from MQTT topics.
+            async_unsubscribe_topics(hass, entry_data["internal_mqtt"])
+            service_status = hass.data[DOMAIN].get(SERVICE_STATUS_STORAGE_KEY, {})
+            service_status.pop(entry.data.get("device", {}).get("name", ""), None)
+
+        announcements.async_cancel_pending(hass, entry)
+
+        # Both MQTT and HA API paths have WebSocket event listeners.
+        for unsub in entry_data.get("ws_unsubs", []):
+            unsub()
+
+    hass.data[DOMAIN].pop(entry.entry_id, None)
+
+    return True
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Set up hass_agent integration."""
+
+    _logger.debug("integration setup start")
+
+    hass.data.setdefault(DOMAIN, {})
+
+    # --- HA API WebSocket auto-discovery ---
+    # When an agent connects via HA API and fires hass_agent_device_update,
+    # automatically start a config flow if the device isn't known yet.
+    @callback
+    def _ws_auto_discover(event) -> None:
+        data = event.data
+        serial_number = data.get("serial_number")
+        if not isinstance(serial_number, str) or not serial_number:
+            return
+
+        # Kept for the entry's own setup: at a Home Assistant start the client is often
+        # back on the WebSocket, and has sent this, before its entry is set up.
+        if isinstance(data.get("apis"), dict):
+            hass.data[DOMAIN].setdefault(WS_DEVICES_STORAGE_KEY, {})[serial_number] = dict(data)
+
+        # Already configured?
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            if entry.unique_id == serial_number:
+                return
+
+        _logger.info("discovered new HASS.Agent device via HA API: %s", serial_number)
+        hass.async_create_task(
+            hass.config_entries.flow.async_init(
+                DOMAIN,
+                context={"source": "ha_api"},
+                data=data,
+            )
+        )
+
+    hass.bus.async_listen("hass_agent_device_update", _ws_auto_discover)
+
+    # The HA API commands for a PC with a user of its own (not an administrator).
+    ws_commands.async_register(hass)
+
+    def should_route_to_system_service(device_name: str, command: str | None, restart_cancel: bool) -> bool:
+        command_name = "restart_cancel" if restart_cancel else command
+        if command_name not in SYSTEM_SERVICE_COMMANDS:
+            return False
+
+        service_status = hass.data.get(DOMAIN, {}).get(SERVICE_STATUS_STORAGE_KEY, {}).get(device_name, {})
+        if not isinstance(service_status, dict) or service_status.get("online") is not True:
+            return False
+
+        commands = service_status.get("commands")
+        return any(
+            isinstance(command, dict) and command.get("name") == command_name
+            for command in commands
+        ) if isinstance(commands, list) else False
+
+    def _entry_for_device_name(device_name: str) -> ConfigEntry | None:
+        """The one entry with this device name.
+
+        A PC names itself, so two of them can end up with the same name; a command that
+        should go to one of them then goes to neither, rather than to the wrong one.
+        """
+        matches = [
+            entry
+            for entry in hass.config_entries.async_entries(DOMAIN)
+            if isinstance(entry.data.get("device"), dict) and entry.data["device"].get("name") == device_name
+        ]
+        if len(matches) > 1:
+            raise HomeAssistantError(
+                f"more than one HASS.Agent device is called {device_name}; rename one of them in the Windows app"
+            )
+        return matches[0] if matches else None
+
+    def serial_number_for_device_name(device_name: str) -> str | None:
+        entry = _entry_for_device_name(device_name)
+        return entry.unique_id if entry else None
+
+    def _is_ha_api_only_entry(device_name: str) -> bool:
+        """Check if the device is configured as HA API only (no MQTT)."""
+        entry = _entry_for_device_name(device_name)
+        return bool(entry and entry.data.get(CONF_HA_API, False))
+
+    announcements.async_register_service(hass, _entry_for_device_name)
+
+    async def async_execute_command(call) -> None:
+        device_name = call.data[CONF_DEVICE_NAME]
+        command = call.data.get(CONF_COMMAND)
+        restart_cancel = call.data[CONF_RESTART_CANCEL]
+
+        if not restart_cancel and command is None:
+            raise HomeAssistantError("command is required unless restart_cancel is true")
+
+        payload = {CONF_RESTART_CANCEL: restart_cancel}
+        if command is not None:
+            payload[CONF_COMMAND] = command
+        if not restart_cancel:
+            payload[CONF_FORCE] = call.data[CONF_FORCE]
+            payload[CONF_TIME] = call.data[CONF_TIME]
+            comment = call.data.get(CONF_COMMENT)
+            if comment is not None:
+                payload[CONF_COMMENT] = comment
+
+        serial_number = serial_number_for_device_name(device_name)
+        if serial_number is None:
+            raise HomeAssistantError(f"device not found: {device_name}")
+
+        ha_api_only = _is_ha_api_only_entry(device_name)
+
+        if not ha_api_only:
+            topic = (
+                f"hass.agent/system/{serial_number}/cmd"
+                if should_route_to_system_service(device_name, command, restart_cancel)
+                else f"hass.agent/buttons/{serial_number}/cmd"
+            )
+
+            await mqtt.async_publish(
+                hass,
+                topic,
+                json.dumps(payload),
+                qos=0,
+                retain=False,
+            )
+
+        # Also fire on the event bus for WebSocket transport.
+        hass.bus.async_fire("hass_agent_command", {
+            "serial_number": serial_number,
+            "command_type": "button_command",
+            "payload": payload,
+        })
+
+    async def async_set_app_volume(call) -> None:
+        """Set the volume or mute of one app in the volume mixer (client 10.9.0+, tray app)."""
+        device_name = call.data[CONF_DEVICE_NAME]
+        if CONF_VOLUME not in call.data and CONF_MUTED not in call.data:
+            raise HomeAssistantError("volume or muted is required")
+
+        serial_number = serial_number_for_device_name(device_name)
+        if serial_number is None:
+            raise HomeAssistantError(f"device not found: {device_name}")
+
+        payload: dict[str, Any] = {"command": "set_app_volume", "text": call.data[CONF_APP]}
+        if CONF_VOLUME in call.data:
+            payload["value"] = call.data[CONF_VOLUME]
+        if CONF_MUTED in call.data:
+            payload["muted"] = call.data[CONF_MUTED]
+
+        if not _is_ha_api_only_entry(device_name):
+            try:
+                await mqtt.async_publish(
+                    hass,
+                    f"hass.agent/buttons/{serial_number}/cmd",
+                    json.dumps(payload),
+                    qos=0,
+                    retain=False,
+                )
+            except HomeAssistantError as err:
+                # The broker being away must not keep the command from the HA API transport.
+                _logger.debug("set_app_volume not sent over MQTT: %s", err)
+
+        hass.bus.async_fire("hass_agent_command", {
+            "serial_number": serial_number,
+            "command_type": "button_command",
+            "target": "app",
+            "payload": payload,
+        })
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_APP_VOLUME,
+        async_set_app_volume,
+        schema=vol.Schema(
+            {
+                vol.Required(CONF_DEVICE_NAME): cv.string,
+                vol.Required(CONF_APP): cv.string,
+                vol.Optional(CONF_VOLUME): vol.All(vol.Coerce(int), vol.Range(min=0, max=100)),
+                vol.Optional(CONF_MUTED): cv.boolean,
+            }
+        ),
+    )
+
+    service.async_register_platform_entity_service(
+        hass,
+        DOMAIN,
+        SERVICE_SEND_NOTIFICATION,
+        entity_domain=NOTIFY_DOMAIN,
+        schema={
+            vol.Required(ATTR_MESSAGE): cv.string,
+            vol.Optional(ATTR_TITLE): cv.string,
+            vol.Optional("image"): cv.string,
+            vol.Optional("style"): vol.In(["toast", "window"]),
+            vol.Optional("duration"): vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
+            vol.Optional("actions"): vol.All(
+                cv.ensure_list,
+                vol.Length(max=5),
+                [vol.Schema({vol.Required("action"): cv.string, vol.Optional("title"): cv.string}, extra=vol.ALLOW_EXTRA)],
+            ),
+            vol.Optional("inputs"): vol.All(
+                cv.ensure_list,
+                vol.Length(max=5),
+                [vol.Schema({vol.Optional("id"): cv.string, vol.Optional("title"): cv.string}, extra=vol.ALLOW_EXTRA)],
+            ),
+            # The older way of giving the fields above, kept for existing automations.
+            vol.Optional(ATTR_DATA, default={}): dict,
+        },
+        func="async_send_hass_agent_notification",
+    )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_EXECUTE_COMMAND,
+        async_execute_command,
+        schema=vol.Schema(
+            {
+                vol.Required(CONF_DEVICE_NAME): cv.string,
+                vol.Optional(CONF_COMMAND): vol.In(SYSTEM_COMMANDS),
+                vol.Optional(CONF_COMMENT): cv.string,
+                vol.Optional(CONF_FORCE, default=False): cv.boolean,
+                vol.Optional(CONF_TIME, default=0): vol.All(vol.Coerce(int), vol.Range(min=0, max=315360000)),
+                vol.Optional(CONF_RESTART_CANCEL, default=False): cv.boolean,
+            }
+        ),
+    )
+
+    return True

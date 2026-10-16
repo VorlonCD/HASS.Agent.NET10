@@ -9,6 +9,12 @@ internal static class AppUpdateService
 {
     public static async Task<AppUpdateState> CheckAsync(string installedVersion, bool includePrereleases = false, CancellationToken cancellationToken = default)
     {
+        if (!AppIdentity.AutomaticUpdatesEnabled)
+        {
+            return new AppUpdateState(AppIdentity.DisplayName, installedVersion, installedVersion,
+                false, AppIdentity.GitHubRepositoryUrl, null, null, DateTimeOffset.UtcNow, null,
+                "Updates are managed manually from the VorlonCD source fork.");
+        }
         try
         {
             using var http = new HttpClient();
@@ -156,6 +162,8 @@ internal static class AppUpdateService
 
     public static async Task<string> DownloadAsync(AppUpdateState update, string targetDirectory, CancellationToken cancellationToken = default)
     {
+        if (!AppIdentity.AutomaticUpdatesEnabled)
+            throw new InvalidOperationException("This source-managed build does not install release updates.");
         if (string.IsNullOrWhiteSpace(update.DownloadUrl) || string.IsNullOrWhiteSpace(update.AssetName))
         {
             throw new InvalidOperationException("No downloadable update asset is available.");

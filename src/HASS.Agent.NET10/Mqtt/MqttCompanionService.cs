@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using HASS.Agent.Companion.Announcements;
 using HASS.Agent.Companion.Configuration;
 using HASS.Agent.Companion.Http;
 using HASS.Agent.Companion.Localization;
@@ -22,6 +23,18 @@ namespace HASS.Agent.Companion.Mqtt;
 
 internal sealed class MqttCompanionService : IDisposable
 {
+    public AnnouncementCoordinator? Announcements { get; set; }
+
+    // Audio/display sensor controls share the command topic with buttons; they must
+    // still work when every power and script command is disabled.
+    internal static bool RequiresTrayCommandSubscription(CompanionSettings settings) =>
+        settings.MqttButtonsEnabled || settings.BuiltInSensors.Any(sensor => sensor.TrayApp &&
+            sensor.Key is "audio_sessions" or "audio_output_device" or "audio_input_device" or "display_brightness");
+
+    public Task PublishAnnouncementResultAsync(AnnouncementResult result) => PublishJsonAsync(
+        $"hass.agent/media_player/{TopicId}/announcement/state",
+        new { request_id = result.RequestId, status = result.Status, reason = result.Reason }, retain: false);
+
     private static readonly TimeSpan UpdateCheckInterval = TimeSpan.FromHours(6);
 
     // A failed check is tried again after a minute, a few times: right after boot the service
@@ -206,7 +219,7 @@ internal sealed class MqttCompanionService : IDisposable
             || _connectedHaApiToken != _settings.GetHaApiToken()
             || _subscribedNotifications != _settings.MqttNotificationsEnabled
             || _subscribedMediaPlayer != _settings.MqttMediaPlayerEnabled
-            || _subscribedButtons != _settings.MqttButtonsEnabled;
+            || _subscribedButtons != RequiresTrayCommandSubscription(_settings);
     }
 
     public async Task PublishNotificationActionAsync(string action, IReadOnlyDictionary<string, string>? input = null)
@@ -544,6 +557,7 @@ internal sealed class MqttCompanionService : IDisposable
     /// <summary>Handles the Install button of the HA update entity (tray app role).</summary>
     private async Task HandleUpdateInstallRequestAsync()
     {
+        if (!AppIdentity.AutomaticUpdatesEnabled) return;
         if (Interlocked.Exchange(ref _updateInstallInProgress, 1) == 1)
         {
             _log.Info("Update install already in progress, ignoring request.");
@@ -652,6 +666,7 @@ internal sealed class MqttCompanionService : IDisposable
     /// </summary>
     private async Task RunSilentUpdateInstallAsync(bool announce = false)
     {
+        if (!AppIdentity.AutomaticUpdatesEnabled) return;
         // One installer at a time: a second Install while the first is still downloading
         // must not schedule a second setup. Once scheduled, the installer stops this
         // service anyway; the flag is released only when nothing was scheduled, or after
@@ -1092,7 +1107,7 @@ internal sealed class MqttCompanionService : IDisposable
                 _connectedHaApiToken = _settings.GetHaApiToken();
                 _subscribedNotifications = _settings.MqttNotificationsEnabled;
                 _subscribedMediaPlayer = _settings.MqttMediaPlayerEnabled;
-                _subscribedButtons = _settings.MqttButtonsEnabled;
+                _subscribedButtons = RequiresTrayCommandSubscription(_settings);
 
                 connectionCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
@@ -1422,7 +1437,7 @@ internal sealed class MqttCompanionService : IDisposable
             _settings.MqttMediaPlayerEnabled,
             buttonsEnabled,
             systemSensorsEnabled,
-            true,
+            AppIdentity.AutomaticUpdatesEnabled,
             buttonsEnabled ? BuildCommandDescriptors(_settings.TrayAppCommands) : [],
             systemSensorsEnabled ? BuildCustomSensorDescriptors(serviceRole: false) : [],
             systemSensorsEnabled ? BuildStandardSensorDescriptors(serviceRole: false) : [],
@@ -1697,7 +1712,7 @@ internal sealed class MqttCompanionService : IDisposable
             hasSubscriptions = true;
         }
 
-        if (_settings.MqttButtonsEnabled)
+        if (RequiresTrayCommandSubscription(_settings))
         {
             builder.WithTopicFilter($"hass.agent/buttons/{TopicId}/cmd", MqttQualityOfServiceLevel.AtMostOnce);
             hasSubscriptions = true;
@@ -1742,7 +1757,19 @@ internal sealed class MqttCompanionService : IDisposable
             if (topic == $"hass.agent/media_player/{TopicId}/cmd")
             {
                 var command = JsonSerializer.Deserialize<MediaCommand>(payload, JsonOptions);
-                if (command is not null && _mediaSessionService is not null)
+                if (command is not null && string.Equals(command.Command, "announce", StringComparison.OrdinalIgnoreCase))
+                {
+                    var supported = _settings.MqttMediaPlayerEnabled && Announcements is not null && !args.ApplicationMessage.Retain;
+                    if (supported && AnnouncementProtocol.TryParse(command.Data, DateTimeOffset.UtcNow, out var request, out _))
+                        Announcements!.Submit(request!);
+                    else
+                    {
+                        _log.Warning("Announcement command rejected: unavailable or invalid request.");
+                        if (AnnouncementProtocol.TryGetRequestId(command.Data, out var requestId))
+                            await PublishAnnouncementResultAsync(new AnnouncementResult(requestId, "failed", "invalid_request"));
+                    }
+                }
+                else if (command is not null && _mediaSessionService is not null)
                 {
                     await _mediaSessionService.HandleCommandAsync(command);
                 }
@@ -1822,12 +1849,13 @@ internal sealed class MqttCompanionService : IDisposable
                 _settings.MqttMediaPlayerEnabled,
                 buttonsEnabled,
                 systemSensorsEnabled,
-                true,
+                AppIdentity.AutomaticUpdatesEnabled,
                 buttonsEnabled ? BuildCommandDescriptors(_settings.TrayAppCommands) : [],
                 systemSensorsEnabled ? BuildCustomSensorDescriptors(serviceRole: false) : [],
                 systemSensorsEnabled ? BuildStandardSensorDescriptors(serviceRole: false) : [],
                 buttonsEnabled ? BuildCustomCommandDescriptors(serviceRole: false) : [],
-                BuildHotkeyDescriptors());
+                BuildHotkeyDescriptors(),
+                Announcements: _settings.MqttMediaPlayerEnabled && Announcements is not null);
 
         await PublishJsonAsync(
             $"hass.agent/devices/{TopicId}",
@@ -1855,7 +1883,7 @@ internal sealed class MqttCompanionService : IDisposable
     /// </summary>
     private async Task PublishUpdateEntityDiscoveryAsync()
     {
-        if (_integrationOwnsUpdateEntity)
+        if (!AppIdentity.AutomaticUpdatesEnabled || _integrationOwnsUpdateEntity)
         {
             await PublishRawAsync(UpdateDiscoveryTopic, null, retain: true);
             return;
@@ -1957,6 +1985,7 @@ internal sealed class MqttCompanionService : IDisposable
 
     private async Task PublishUpdateLoopAsync(CancellationToken cancellationToken)
     {
+        if (!AppIdentity.AutomaticUpdatesEnabled) return;
         while (!cancellationToken.IsCancellationRequested)
         {
             // The tray app owns the update entity while it runs; the service only stands in

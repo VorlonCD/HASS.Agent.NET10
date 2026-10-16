@@ -1,8 +1,12 @@
 # HASS.Agent .NET10
 
+**VorlonCD source-managed fork.** Windows version `10.9.3-vorlon.1` adds [priority announcements and safe mute restoration](docs/priority-announcements.md). This repository also carries the matching Home Assistant integration in `custom_components/hass_agent`. Automatic installer updates are disabled; use reviewed manual builds. Upstream project links and acknowledgments below describe the original project.
+
+To build a clean, reviewed checkout, run `scripts/build-vorlon.ps1 -SourceCommit <full-commit-sha>`. It runs the .NET tests and produces a self-contained x64 installer plus a SHA-256 receipt. Local unsigned installers are not upstream signed releases. Run the Python integration suite separately before deploying both components.
+
 ![Windows](https://img.shields.io/badge/Windows-10%202004%2B%20%7C%2011-0078D4?logo=windows&logoColor=white)
 ![.NET](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)
-![Version](https://img.shields.io/badge/version-10.9.3--beta.1-orange)
+![Version](https://img.shields.io/badge/version-10.9.3--vorlon.1-orange)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-MQTT%20%7C%20WebSocket%20API-41BDF5?logo=homeassistant&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/15316/badge)](https://www.bestpractices.dev/projects/15316)

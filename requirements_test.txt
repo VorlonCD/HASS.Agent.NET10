@@ -1,0 +1,5 @@
+# Home Assistant and its test helpers for the integration's tests (Python 3.14).
+# Bump together with the Home Assistant version the tests should run against.
+pytest-homeassistant-custom-component==0.13.370
+mutagen==1.48.1
+ha-ffmpeg==3.2.2

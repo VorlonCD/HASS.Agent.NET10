@@ -123,12 +123,12 @@ public class SettingsTests
     }
 
     [Fact]
-    public void Local_api_never_binds_to_loopback_only()
+    public void Local_api_preserves_explicit_loopback_binding()
     {
         var settings = new CompanionSettings { BindHost = "127.0.0.1" };
 
         settings.Normalize();
 
-        Assert.Equal("0.0.0.0", settings.BindHost);
+        Assert.Equal("127.0.0.1", settings.BindHost);
     }
 }

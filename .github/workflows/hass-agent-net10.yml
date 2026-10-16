@@ -1,4 +1,4 @@
-name: V1k70rk4 HASS.Agent .NET10
+name: VorlonCD HASS.Agent .NET10
 
 on:
   push:
@@ -76,7 +76,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $folder = Join-Path $env:RUNNER_TEMP 'signed'
-          gh release download -R $env:GITHUB_REPOSITORY -p 'HASS.Agent.NET10-Setup-*.exe' -D $folder
+          # Signature-verifier fixture only. Deployment builds come from this fork;
+          # unsigned local releases must never be mistaken for a trusted signature.
+          gh release download -R v1k70rk4/HASS.Agent.NET10 -p 'HASS.Agent.NET10-Setup-*.exe' -D $folder
           if ($LASTEXITCODE -ne 0) { throw "Could not download the latest release's installer." }
           $installer = Get-ChildItem $folder -Filter '*.exe' | Select-Object -First 1
           "Signed installer: $($installer.Name)"
