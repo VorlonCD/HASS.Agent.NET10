@@ -1760,11 +1760,12 @@ internal sealed class MqttCompanionService : IDisposable
                 if (command is not null && string.Equals(command.Command, "announce", StringComparison.OrdinalIgnoreCase))
                 {
                     var supported = _settings.MqttMediaPlayerEnabled && Announcements is not null && !args.ApplicationMessage.Retain;
-                    if (supported && AnnouncementProtocol.TryParse(command.Data, DateTimeOffset.UtcNow, out var request, out _))
+                    var reason = "unavailable";
+                    if (supported && AnnouncementProtocol.TryParse(command.Data, DateTimeOffset.UtcNow, out var request, out reason))
                         Announcements!.Submit(request!);
                     else
                     {
-                        _log.Warning("Announcement command rejected: unavailable or invalid request.");
+                        _log.Warning($"Announcement command rejected: {reason}.");
                         if (AnnouncementProtocol.TryGetRequestId(command.Data, out var requestId))
                             await PublishAnnouncementResultAsync(new AnnouncementResult(requestId, "failed", "invalid_request"));
                     }

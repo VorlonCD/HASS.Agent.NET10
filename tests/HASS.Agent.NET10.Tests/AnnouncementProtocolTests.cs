@@ -35,7 +35,7 @@ public sealed class AnnouncementProtocolTests
     [InlineData("not-a-uuid", "normal", "2032-05-06T07:09:00Z", "invalid_request_id")]
     [InlineData("00000000-0000-0000-0000-000000000000", "urgent", "2032-05-06T07:09:00Z", "invalid_priority")]
     [InlineData("00000000-0000-0000-0000-000000000000", "normal", "2032-05-06T07:08:08Z", "invalid_expiry")]
-    [InlineData("00000000-0000-0000-0000-000000000000", "normal", "2032-05-06T07:10:10Z", "invalid_expiry")]
+    [InlineData("00000000-0000-0000-0000-000000000000", "normal", "2032-05-06T07:10:15Z", "invalid_expiry")]
     [InlineData("00000000-0000-0000-0000-000000000000", "normal", "2032-05-06T09:09:00+02:00", "invalid_expiry")]
     public void Rejects_invalid_identifier_priority_or_expiry_with_fixed_reason(
         string id, string priority, string expiresAt, string expectedReason)
@@ -60,6 +60,17 @@ public sealed class AnnouncementProtocolTests
         Assert.False(AnnouncementProtocol.TryParse(json, Now, out _, out var reason));
         Assert.Equal(expectedReason, reason);
         Assert.DoesNotContain("secret", reason, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(0.5)]
+    [InlineData(5.0)]
+    public void Allows_bounded_sender_clock_skew_without_extending_two_minute_lifetime(double skewSeconds)
+    {
+        var payload = Payload(Guid.NewGuid().ToString("D"), "normal",
+            Now.AddMinutes(2).AddSeconds(skewSeconds).ToString("O"));
+        Assert.True(AnnouncementProtocol.TryParse(payload, Now, out var request, out _));
+        Assert.Equal(Now.AddMinutes(2), request!.ExpiresAt);
     }
 
     [Fact]

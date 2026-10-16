@@ -7,6 +7,7 @@ namespace HASS.Agent.Companion.Announcements;
 internal static class AnnouncementProtocol
 {
     private const int MaximumJsonLength = 32 * 1024;
+    private static readonly TimeSpan MaximumClockSkew = TimeSpan.FromSeconds(5);
 
     public static bool TryGetRequestId(object? data, out string requestId)
     {
@@ -140,11 +141,16 @@ internal static class AnnouncementProtocol
             }
 
             var nowUtc = now.ToUniversalTime();
-            if (expiresAt <= nowUtc || expiresAt > nowUtc.AddMinutes(2))
+            var maximumExpiry = nowUtc.AddMinutes(2);
+            if (expiresAt <= nowUtc || expiresAt > maximumExpiry + MaximumClockSkew)
             {
                 reason = "invalid_expiry";
                 return false;
             }
+
+            // HA and Windows need not agree to the millisecond. Permit bounded
+            // clock skew on receipt, without extending the local request lifetime.
+            if (expiresAt > maximumExpiry) expiresAt = maximumExpiry;
 
             request = new AnnouncementRequest(requestId, speechUri.AbsoluteUri, chimeText, priority, expiresAt);
             reason = string.Empty;
