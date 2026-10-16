@@ -14,7 +14,6 @@ import voluptuous as vol
 from homeassistant.components import media_source, mqtt, tts
 from homeassistant.components.media_player.browse_media import async_process_play_media_url
 from homeassistant.components.mqtt.models import ReceiveMessage
-from homeassistant.components.mqtt.subscription import async_prepare_subscribe_topics
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_URL
 from homeassistant.core import HomeAssistant, SupportsResponse, callback
@@ -83,23 +82,18 @@ def state_topic(topic_id: str) -> str:
     return f"hass.agent/media_player/{topic_id}/announcement/state"
 
 
-def async_prepare_state_subscription(
+def state_subscription_topics(
     hass: HomeAssistant,
     entry: ConfigEntry,
-    subscription_state: dict[str, Any],
 ) -> dict[str, Any]:
-    """Add the per-device terminal-result listener to the shared MQTT subscriptions."""
-    return async_prepare_subscribe_topics(
-        hass,
-        subscription_state,
-        {
-            f"{entry.unique_id}-announcement-state": {
-                "topic": state_topic(entry.unique_id),
-                "msg_callback": state_message_callback(hass, entry),
-                "qos": 0,
-            }
-        },
-    )
+    """Return definitions to combine with every other shared MQTT subscription."""
+    return {
+        f"{entry.unique_id}-announcement-state": {
+            "topic": state_topic(entry.unique_id),
+            "msg_callback": state_message_callback(hass, entry),
+            "qos": 0,
+        }
+    }
 
 
 def state_message_callback(hass: HomeAssistant, entry: ConfigEntry) -> Callable[[ReceiveMessage], None]:

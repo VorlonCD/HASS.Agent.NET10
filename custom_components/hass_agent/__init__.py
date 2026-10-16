@@ -1259,6 +1259,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass,
             sub_state,
             {
+                **announcements.state_subscription_topics(hass, entry),
                 f"{entry.unique_id}-apis": {
                     "topic": f"hass.agent/devices/{topic_id}",
                     "msg_callback": updated,
@@ -1286,8 +1287,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 },
             },
         )
-        sub_state = announcements.async_prepare_state_subscription(hass, entry, sub_state)
-
         await async_subscribe_topics(hass, sub_state)
         await _async_publish_integration_info(hass, entry)
 

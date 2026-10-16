@@ -291,18 +291,9 @@ async def test_announcement_timeout_fires_failed_expired_event(
 
 async def test_state_subscription_uses_same_media_player_topic(
     hass: HomeAssistant,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     entry = add_announcement_device(hass)
-    captured: dict[str, object] = {}
-
-    def prepare_subscribe_topics(hass, current, topics):
-        captured.update(topics)
-        return topics
-
-    monkeypatch.setattr(announcements, "async_prepare_subscribe_topics", prepare_subscribe_topics)
-    announcements.async_prepare_state_subscription(hass, entry, {})
-
+    captured = announcements.state_subscription_topics(hass, entry)
     subscription = captured[f"{SERIAL}-announcement-state"]
     assert subscription["topic"] == announcements.state_topic(SERIAL)
     assert announcements.state_topic(SERIAL) == f"hass.agent/media_player/{SERIAL}/announcement/state"

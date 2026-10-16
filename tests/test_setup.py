@@ -70,6 +70,31 @@ async def test_setup_asks_the_pc_to_announce(hass: HomeAssistant, mqtt_mock) -> 
     assert [event.data for event in events] == [ANNOUNCE]
 
 
+async def test_mqtt_setup_retains_device_and_announcement_subscriptions(
+    hass: HomeAssistant, mqtt_mock
+) -> None:
+    """Adding terminal results must preserve discovery, availability and controls."""
+    assert await async_setup_component(hass, "http", {})
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=SERIAL,
+        title="MY-PC",
+        data={"device": {"name": "MY-PC"}, "apis": {}},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    subscriptions = hass.data[DOMAIN][entry.entry_id]["internal_mqtt"]
+    assert {subscription.topic for subscription in subscriptions.values()} == {
+        f"hass.agent/devices/{SERIAL}",
+        f"hass.agent/devices/{SERIAL}/availability",
+        f"hass.agent/system/{SERIAL}/state",
+        f"hass.agent/persistent_notification/{SERIAL}",
+        f"hass.agent/update/{SERIAL}/state",
+        f"hass.agent/media_player/{SERIAL}/announcement/state",
+    }
+
+
 async def test_reload_asks_again_after_its_setup(hass: HomeAssistant, ha_api_pc: MockConfigEntry) -> None:
     events = async_capture_events(hass, "hass_agent_command")
 
