@@ -438,8 +438,9 @@ internal static class AnnouncementRecovery
         };
         if (string.Equals(Path.GetFileNameWithoutExtension(executable), "dotnet", StringComparison.OrdinalIgnoreCase))
         {
-            var assemblyPath = typeof(AnnouncementRecovery).Assembly.Location;
-            if (string.IsNullOrWhiteSpace(assemblyPath))
+            var assemblyPath = Path.Combine(AppContext.BaseDirectory,
+                typeof(AnnouncementRecovery).Assembly.GetName().Name + ".dll");
+            if (!File.Exists(assemblyPath))
             {
                 throw new InvalidOperationException("The announcement recovery helper could not find the application assembly.");
             }
